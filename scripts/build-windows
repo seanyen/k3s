@@ -60,7 +60,12 @@ cleanup() {
 TMPDIR=$(mktemp -d)
 trap cleanup EXIT
 WORKDIR=$TMPDIR/src/github.com/containernetworking/plugins
-git clone -b seanyen/v1.0.1-k3s1 https://github.com/seanyen/plugins.git $WORKDIR
+git clone -b $VERSION_CNIPLUGINS https://github.com/rancher/plugins.git $WORKDIR
+
+PLUGINS_WINDOWS_PATCH=$(pwd)/scripts/plugins-windows.patch
+pushd $WORKDIR
+patch -p1 < $PLUGINS_WINDOWS_PATCH
+popd
 
 GOOS=windows CGO_ENABLED=0 \
     GO111MODULE=off GOPATH=$TMPDIR "${GO}" build -tags "$TAGS" -ldflags "$LDFLAGS $STATIC" -o $INSTALLBIN/cni.exe $WORKDIR
