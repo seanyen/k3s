@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -41,11 +42,11 @@ func main() {
 	// Handle subcommand invocation (k3s server, k3s crictl, etc)
 	app := cmds.NewApp()
 	app.Commands = []cli.Command{
-		cmds.NewServerCommand(internalCLIAction(version.Program+"-server", dataDir, os.Args)),
-		cmds.NewAgentCommand(internalCLIAction(version.Program+"-agent", dataDir, os.Args)),
-		cmds.NewKubectlCommand(externalCLIAction("kubectl", dataDir)),
-		cmds.NewCRICTL(externalCLIAction("crictl", dataDir)),
-		cmds.NewCtrCommand(externalCLIAction("ctr", dataDir)),
+		cmds.NewServerCommand(internalCLIAction(version.Program+"-server.exe", dataDir, os.Args)),
+		cmds.NewAgentCommand(internalCLIAction(version.Program+"-agent.exe", dataDir, os.Args)),
+		cmds.NewKubectlCommand(externalCLIAction("kubectl.exe", dataDir)),
+		cmds.NewCRICTL(externalCLIAction("crictl.exe", dataDir)),
+		cmds.NewCtrCommand(externalCLIAction("ctr.exe", dataDir)),
 		cmds.NewCheckConfigCommand(externalCLIAction("check-config", dataDir)),
 		cmds.NewEtcdSnapshotCommand(etcdsnapshotCommand,
 			cmds.NewEtcdSnapshotSubcommands(
@@ -152,7 +153,7 @@ func stageAndRun(dataDir, cmd string, args []string) error {
 	}
 	logrus.Debugf("Asset dir %s", dir)
 
-	if err := os.Setenv("PATH", filepath.Join(dir, "bin")+":"+os.Getenv("PATH")+":"+filepath.Join(dir, "bin/aux")); err != nil {
+	if err := os.Setenv("PATH", filepath.Join(dir, "bin")+string(os.PathListSeparator)+os.Getenv("PATH")+string(os.PathListSeparator)+filepath.Join(dir, "bin/aux")); err != nil {
 		return err
 	}
 	if err := os.Setenv(version.ProgramUpper+"_DATA_DIR", dir); err != nil {
@@ -165,6 +166,16 @@ func stageAndRun(dataDir, cmd string, args []string) error {
 	}
 
 	logrus.Debugf("Running %s %v", cmd, args)
+
+	if runtime.GOOS == "windows" {
+		cmd := exec.Command(cmd, args...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Stdin = os.Stdin
+		cmd.Env = os.Environ()
+		err := cmd.Run()
+		return err
+	}
 
 	return syscall.Exec(cmd, args, os.Environ())
 }
@@ -182,13 +193,13 @@ func getAssetAndDir(dataDir string) (string, string) {
 func extract(dataDir string) (string, error) {
 	// first look for global asset folder so we don't create a HOME version if not needed
 	_, dir := getAssetAndDir(datadir.DefaultDataDir)
-	if _, err := os.Stat(filepath.Join(dir, "bin", "k3s")); err == nil {
+	if _, err := os.Stat(filepath.Join(dir, "bin", "k3s.exe")); err == nil {
 		return dir, nil
 	}
 
 	asset, dir := getAssetAndDir(dataDir)
 	// check if target content already exists
-	if _, err := os.Stat(filepath.Join(dir, "bin", "k3s")); err == nil {
+	if _, err := os.Stat(filepath.Join(dir, "bin", "k3s.exe")); err == nil {
 		return dir, nil
 	}
 
