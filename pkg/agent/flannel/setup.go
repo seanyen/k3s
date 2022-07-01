@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 
 	"github.com/k3s-io/k3s/pkg/agent/util"
@@ -92,7 +93,12 @@ const (
 )
 
 func Prepare(ctx context.Context, nodeConfig *config.Node) error {
-	if err := createCNIConf(nodeConfig.AgentConfig.CNIConfDir, nodeConfig); err != nil {
+	extIface, err := LookupExtInterface(nodeConfig.FlannelIface, ipv4)
+	if err != nil {
+		return err
+	}
+
+	if err := createCNIConf(nodeConfig.AgentConfig.CNIConfDir, nodeConfig, extIface.IfaceAddr.String(), !nodeConfig.Docker && nodeConfig.ContainerRuntimeEndpoint == ""); err != nil {
 		return err
 	}
 
@@ -147,7 +153,7 @@ func waitForPodCIDR(ctx context.Context, nodeName string, nodes typedcorev1.Node
 	return nil
 }
 
-func createCNIConf(dir string, nodeConfig *config.Node) error {
+func createCNIConf(dir string, nodeConfig *config.Node, ipv4Address string, containerd bool) error {
 	logrus.Debugf("Creating the CNI conf in directory %s", dir)
 	if dir == "" {
 		return nil
@@ -158,7 +164,14 @@ func createCNIConf(dir string, nodeConfig *config.Node) error {
 		logrus.Debugf("Using %s as the flannel CNI conf", nodeConfig.AgentConfig.FlannelCniConfFile)
 		return util.CopyFile(nodeConfig.AgentConfig.FlannelCniConfFile, p)
 	}
-	return util.WriteFile(p, cniConf)
+	cniConfJSON := cniConf
+	if goruntime.GOOS == "windows" {
+		if containerd {
+			cniConfJSON = strings.ReplaceAll(cniConfV2, "%IPV4_ADDRESS%", ipv4Address)
+		}
+	}
+
+	return util.WriteFile(p, cniConfJSON)
 }
 
 func createFlannelConf(nodeConfig *config.Node) error {

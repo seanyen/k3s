@@ -15,6 +15,7 @@ import (
 )
 
 func Main() {
+	os.Args = os.Args[1:]
 	kubenv := os.Getenv("KUBECONFIG")
 	for i, arg := range os.Args {
 		if strings.HasPrefix(arg, "--kubeconfig=") {
