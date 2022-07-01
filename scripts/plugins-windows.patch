@@ -1,0 +1,105 @@
+diff --git a/main.go b/main.go
+index 2dda38ae4..78b76918e 100644
+--- a/main.go
++++ b/main.go
+@@ -5,19 +5,21 @@ import (
+ 	"path/filepath"
+ 
+ 	"github.com/containernetworking/plugins/plugins/ipam/host-local"
+-	"github.com/containernetworking/plugins/plugins/main/bridge"
+-	"github.com/containernetworking/plugins/plugins/main/loopback"
++	"github.com/containernetworking/plugins/plugins/main/windows/win-bridge"
++	"github.com/containernetworking/plugins/plugins/main/windows/win-overlay"
+ 	"github.com/containernetworking/plugins/plugins/meta/flannel"
+-	"github.com/containernetworking/plugins/plugins/meta/portmap"
+ 	"github.com/docker/docker/pkg/reexec"
+ )
+ 
+ func main() {
+ 	os.Args[0] = filepath.Base(os.Args[0])
++	reexec.Register("host-local.exe", hostlocal.Main)
++	reexec.Register("win-bridge.exe", winbridge.Main)
++	reexec.Register("win-overlay.exe", winoverlay.Main)
++	reexec.Register("flannel.exe", flannel.Main)
+ 	reexec.Register("host-local", hostlocal.Main)
+-	reexec.Register("bridge", bridge.Main)
++	reexec.Register("win-bridge", winbridge.Main)
++	reexec.Register("win-overlay", winoverlay.Main)
+ 	reexec.Register("flannel", flannel.Main)
+-	reexec.Register("loopback", loopback.Main)
+-	reexec.Register("portmap", portmap.Main)
+ 	reexec.Init()
+ }
+diff --git a/plugins/main/windows/win-bridge/win-bridge_windows.go b/plugins/main/windows/win-bridge/win-bridge_windows.go
+index 3e6de2b41..45649676f 100644
+--- a/plugins/main/windows/win-bridge/win-bridge_windows.go
++++ b/plugins/main/windows/win-bridge/win-bridge_windows.go
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-package main
++package winbridge
+ 
+ import (
+ 	"encoding/json"
+@@ -214,6 +214,6 @@ func cmdCheck(_ *skel.CmdArgs) error {
+ 	return nil
+ }
+ 
+-func main() {
++func Main() {
+ 	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.All, bv.BuildString("win-bridge"))
+ }
+diff --git a/plugins/main/windows/win-overlay/win-overlay_windows.go b/plugins/main/windows/win-overlay/win-overlay_windows.go
+index 6c124d88b..cbd9830ef 100644
+--- a/plugins/main/windows/win-overlay/win-overlay_windows.go
++++ b/plugins/main/windows/win-overlay/win-overlay_windows.go
+@@ -12,7 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-package main
++package winoverlay
+ 
+ import (
+ 	"encoding/json"
+@@ -172,6 +172,6 @@ func cmdCheck(_ *skel.CmdArgs) error {
+ 	return nil
+ }
+ 
+-func main() {
++func Main() {
+ 	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.All, bv.BuildString("win-overlay"))
+ }
+diff --git a/plugins/meta/flannel/flannel.go b/plugins/meta/flannel/flannel.go
+index bb0fcb829..a572befb7 100644
+--- a/plugins/meta/flannel/flannel.go
++++ b/plugins/meta/flannel/flannel.go
+@@ -29,7 +29,6 @@ import (
+ 	"net"
+ 	"os"
+ 	"path/filepath"
+-	"runtime"
+ 	"strconv"
+ 	"strings"
+ 
+@@ -37,6 +36,8 @@ import (
+ 	"github.com/containernetworking/cni/pkg/skel"
+ 	"github.com/containernetworking/cni/pkg/types"
+ 	cni "github.com/containernetworking/cni/pkg/version"
++
++	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
+ )
+ 
+ const (
+@@ -277,8 +278,7 @@ func cmdDel(args *skel.CmdArgs) error {
+ }
+ 
+ func Main() {
+-	fullVer := fmt.Sprintf("CNI Plugin %s version %s (%s/%s) commit %s built on %s", Program, Version, runtime.GOOS, runtime.GOARCH, Commit, buildDate)
+-	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, cni.All, fullVer)
++	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, cni.All, bv.BuildString("flannel"))
+ }
+ 
+ func cmdCheck(args *skel.CmdArgs) error {
