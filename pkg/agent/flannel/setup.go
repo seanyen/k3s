@@ -32,12 +32,6 @@ const (
         "forceAddress":true,
         "isDefaultGateway":true
       }
-    },
-    {
-      "type":"portmap",
-      "capabilities":{
-        "portMappings":true
-      }
     }
   ]
 }

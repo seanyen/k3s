@@ -44,9 +44,9 @@ func main() {
 	app.Commands = []cli.Command{
 		cmds.NewServerCommand(internalCLIAction(version.Program+"-server.exe", dataDir, os.Args)),
 		cmds.NewAgentCommand(internalCLIAction(version.Program+"-agent.exe", dataDir, os.Args)),
-		cmds.NewKubectlCommand(externalCLIAction("kubectl.exe", dataDir)),
-		cmds.NewCRICTL(externalCLIAction("crictl.exe", dataDir)),
-		cmds.NewCtrCommand(externalCLIAction("ctr.exe", dataDir)),
+		cmds.NewKubectlCommand(externalCLIAction("kubectl", dataDir)),
+		cmds.NewCRICTL(externalCLIAction("crictl", dataDir)),
+		cmds.NewCtrCommand(externalCLIAction("ctr", dataDir)),
 		cmds.NewCheckConfigCommand(externalCLIAction("check-config", dataDir)),
 		cmds.NewEtcdSnapshotCommand(etcdsnapshotCommand,
 			cmds.NewEtcdSnapshotSubcommands(
@@ -130,7 +130,7 @@ func externalCLI(cli, dataDir string, args []string) error {
 			os.Setenv("CRI_CONFIG_FILE", findCriConfig(dataDir))
 		}
 	}
-	return stageAndRun(dataDir, cli, append([]string{cli}, args...))
+	return stageAndRun(dataDir, cli, append([]string{cli}, args...), false)
 }
 
 // internalCLIAction returns a function that will call a K3s internal command, be used as the Action of a cli.Command.
@@ -142,11 +142,11 @@ func internalCLIAction(cmd, dataDir string, args []string) func(ctx *cli.Context
 
 // stageAndRunCLI calls an external binary.
 func stageAndRunCLI(cli *cli.Context, cmd string, dataDir string, args []string) error {
-	return stageAndRun(dataDir, cmd, args)
+	return stageAndRun(dataDir, cmd, args, true)
 }
 
 // stageAndRun does the actual work of setting up and calling an external binary.
-func stageAndRun(dataDir, cmd string, args []string) error {
+func stageAndRun(dataDir, cmd string, args []string, calledAsInternal bool) error {
 	dir, err := extract(dataDir)
 	if err != nil {
 		return errors.Wrap(err, "extracting data")
@@ -168,6 +168,9 @@ func stageAndRun(dataDir, cmd string, args []string) error {
 	logrus.Debugf("Running %s %v", cmd, args)
 
 	if runtime.GOOS == "windows" {
+		if calledAsInternal {
+			args = args[1:]
+		}
 		cmd := exec.Command(cmd, args...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr

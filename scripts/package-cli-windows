@@ -12,9 +12,9 @@ for i in crictl kubectl k3s-agent k3s-server k3s-etcd-snapshot k3s-secrets-encry
     ln -s k3s.exe bin/$i.exe
 done
 
-for i in bridge flannel host-local loopback portmap; do
+for i in win-bridge win-overlay flannel host-local portmap; do
     rm -f bin/$i.exe
-    ln -s cni bin/$i.exe
+    ln -s cni.exe bin/$i.exe
 done
 
 cp contrib/util/check-config.sh bin/check-config

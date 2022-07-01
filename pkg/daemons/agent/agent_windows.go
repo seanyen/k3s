@@ -17,7 +17,7 @@ import (
 	"k8s.io/kubernetes/pkg/kubeapiserver/authorizer/modes"
 )
 
-var NetworkName = "vxlan0"
+var NetworkName = "flannel.4096"
 
 func checkRuntimeEndpoint(cfg *config.Agent, argsMap map[string]string) {
 	if strings.HasPrefix(cfg.RuntimeSocket, windowsPrefix) {
