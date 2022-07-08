@@ -4,7 +4,10 @@
 package agent
 
 import (
+	"bytes"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -43,7 +46,7 @@ func kubeProxyArgs(cfg *config.Agent) map[string]string {
 		argsMap["hostname-override"] = cfg.NodeName
 	}
 
-	if sourceVip := waitForManagementIP(NetworkName); sourceVip != "" {
+	if sourceVip := waitForSourceVip(NetworkName); sourceVip != "" {
 		argsMap["source-vip"] = sourceVip
 	}
 
@@ -140,7 +143,7 @@ func kubeletArgs(cfg *config.Agent) map[string]string {
 	return argsMap
 }
 
-func waitForManagementIP(networkName string) string {
+func waitForSourceVip(networkName string) string {
 	for range time.Tick(time.Second * 5) {
 		network, err := hcsshim.GetHNSNetworkByName(networkName)
 		if err != nil {
@@ -150,7 +153,63 @@ func waitForManagementIP(networkName string) string {
 		if network.ManagementIP == "" {
 			continue
 		}
-		return network.ManagementIP
+
+		script := `function GetSourceVip {
+			param(
+					$NetworkName
+				)
+			$hnsNetwork = Get-HnsNetwork | ? Name -EQ $NetworkName.ToLower()
+    		$subnet = $hnsNetwork.Subnets[0].AddressPrefix
+			$ipamConfig = @"
+        {"cniVersion": "0.2.0", "name": "vxlan0", "ipam":{"type":"host-local","ranges":[[{"subnet":"$subnet"}]],"dataDir":"/var/lib/cni/networks"}}
+"@
+			$ipamConfig | Out-File "C:\k\sourceVipRequest.json"
+			$env:CNI_COMMAND="ADD"
+			$env:CNI_CONTAINERID="dummy"
+			$env:CNI_NETNS="dummy"
+			$env:CNI_IFNAME="dummy"
+			$env:CNI_PATH="dummy"
+
+			If(!(Test-Path c:\k\sourceVip.json)){
+				Get-Content c:\k\sourceVipRequest.json | host-local.exe | Out-File c:\k\sourceVip.json
+			}
+
+			$sourceVipJSON = Get-Content c:\k\sourceVip.json | ConvertFrom-Json
+    		$sourceVip = $sourceVipJSON.ip4.ip.Split("/")[0]
+
+			Remove-Item env:CNI_COMMAND
+			Remove-Item env:CNI_CONTAINERID
+			Remove-Item env:CNI_NETNS
+			Remove-Item env:CNI_IFNAME
+			Remove-Item env:CNI_PATH
+
+			return $sourceVip
+			}
+		`
+
+		sourceVip := executePowershell(script, `GetSourceVip -NetworkName %s`, networkName)
+
+		sourceVip = strings.TrimRight(sourceVip, "\r\n")
+
+		return sourceVip
 	}
 	return ""
+}
+
+func executePowershell(script string, command string, args ...interface{}) (outputJson string) {
+	powershellCommand := script
+	powershellCommand += fmt.Sprintf(command, args...)
+
+	cmd := exec.Command("powershell.exe", powershellCommand)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+	err := cmd.Run()
+
+	if err != nil {
+		return ""
+	}
+
+	return out.String()
 }
