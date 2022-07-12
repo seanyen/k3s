@@ -25,4 +25,5 @@ const (
   ]
 }
 `
+  cniConfV2 = cniConf
 )

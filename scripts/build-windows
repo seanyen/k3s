@@ -63,8 +63,10 @@ WORKDIR=$TMPDIR/src/github.com/containernetworking/plugins
 git clone -b $VERSION_CNIPLUGINS https://github.com/rancher/plugins.git $WORKDIR
 
 PLUGINS_WINDOWS_PATCH=$(pwd)/scripts/plugins-windows.patch
+WIN_OVERLAY_WINDOWS_PATCH=$(pwd)/scripts/win-overlay-windows.patch
 pushd $WORKDIR
 patch -p1 < $PLUGINS_WINDOWS_PATCH
+patch -p1 < $WIN_OVERLAY_WINDOWS_PATCH
 popd
 
 GOOS=windows CGO_ENABLED=0 \
