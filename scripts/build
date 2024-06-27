@@ -148,7 +148,7 @@ if [ ! -x ${INSTALLBIN}/cni${BINARY_POSTFIX} ]; then
 (
     echo Building cni
     TMPDIR=$(pwd)/build
-    trap cleanup EXIT
+    # trap cleanup EXIT
     WORKDIR=$TMPDIR/src/github.com/containernetworking/plugins
     # git clone -b $VERSION_CNIPLUGINS https://github.com/rancher/plugins.git $WORKDIR
     cd $WORKDIR
