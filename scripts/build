@@ -63,8 +63,8 @@ fi
 STATIC="
     -extldflags '-static -lm -ldl -lz -lpthread'
 "
-TAGS="ctrd apparmor seccomp netcgo osusergo providerless urfave_cli_no_docs"
-RUNC_TAGS="apparmor seccomp"
+TAGS="ctrd netcgo osusergo providerless urfave_cli_no_docs"
+RUNC_TAGS=""
 RUNC_STATIC="static"
 
 if [ ${OS} = windows ]; then
