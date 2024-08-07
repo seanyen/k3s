@@ -86,11 +86,14 @@ func main() {
 	}
 }
 
-// findDataDir reads data-dir settings from the CLI args and config file.
+// findDataDir reads data-dir settings from the environment, CLI args, and config file.
 // If not found, the default will be used, which varies depending on whether
 // k3s is being run as root or not.
 func findDataDir(args []string) string {
-	var dataDir string
+	dataDir := os.Getenv(version.ProgramUpper + "_DATA_DIR")
+	if dataDir != "" {
+		return dataDir
+	}
 	fs := pflag.NewFlagSet("data-dir-set", pflag.ContinueOnError)
 	fs.ParseErrorsWhitelist.UnknownFlags = true
 	fs.SetOutput(io.Discard)
@@ -191,9 +194,6 @@ func stageAndRun(dataDir, cmd string, args []string, calledAsInternal bool) erro
 		pathEnv = filepath.Join(dir, "bin") + string(os.PathListSeparator) + os.Getenv("PATH") + string(os.PathListSeparator) + filepath.Join(dir, "bin/aux")
 	}
 	if err := os.Setenv("PATH", pathEnv); err != nil {
-		return err
-	}
-	if err := os.Setenv(version.ProgramUpper+"_DATA_DIR", dir); err != nil {
 		return err
 	}
 

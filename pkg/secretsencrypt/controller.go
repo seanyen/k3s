@@ -2,6 +2,7 @@ package secretsencrypt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -12,7 +13,6 @@ import (
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -30,13 +30,15 @@ const (
 	secretsProgressEvent       string = "SecretsProgress"
 	secretsUpdateCompleteEvent string = "SecretsUpdateComplete"
 	secretsUpdateErrorEvent    string = "SecretsUpdateError"
+
+	secretListPageSize = 20
 )
 
 type handler struct {
 	ctx           context.Context
 	controlConfig *config.Control
 	nodes         coreclient.NodeController
-	secrets       coreclient.SecretController
+	k8s           *kubernetes.Clientset
 	recorder      record.EventRecorder
 }
 
@@ -45,12 +47,14 @@ func Register(
 	controllerName string,
 	controlConfig *config.Control,
 	nodes coreclient.NodeController,
-	secrets coreclient.SecretController,
 ) error {
 	restConfig, err := clientcmd.BuildConfigFromFlags("", controlConfig.Runtime.KubeConfigSupervisor)
 	if err != nil {
 		return err
 	}
+	// For secrets we need a much higher QPS than what wrangler provides, so we create a new clientset
+	restConfig.QPS = 200
+	restConfig.Burst = 200
 	k8s, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		return err
@@ -60,7 +64,7 @@ func Register(
 		ctx:           ctx,
 		controlConfig: controlConfig,
 		nodes:         nodes,
-		secrets:       secrets,
+		k8s:           k8s,
 		recorder:      util.BuildControllerEventRecorder(k8s, controllerAgentName, metav1.NamespaceDefault),
 	}
 
@@ -116,7 +120,7 @@ func (h *handler) onChangeNode(nodeName string, node *corev1.Node) (*corev1.Node
 		return node, err
 	}
 
-	if err := h.updateSecrets(node); err != nil {
+	if err := h.updateSecrets(nodeRef); err != nil {
 		h.recorder.Event(nodeRef, corev1.EventTypeWarning, secretsUpdateErrorEvent, err.Error())
 		return node, err
 	}
@@ -213,36 +217,30 @@ func (h *handler) validateReencryptStage(node *corev1.Node, annotation string) (
 	return true, nil
 }
 
-func (h *handler) updateSecrets(node *corev1.Node) error {
-	nodeRef := &corev1.ObjectReference{
-		Kind:      "Node",
-		Name:      node.Name,
-		UID:       types.UID(node.Name),
-		Namespace: "",
-	}
+func (h *handler) updateSecrets(nodeRef *corev1.ObjectReference) error {
 	secretPager := pager.New(pager.SimplePageFunc(func(opts metav1.ListOptions) (runtime.Object, error) {
-		return h.secrets.List("", opts)
+		return h.k8s.CoreV1().Secrets(metav1.NamespaceAll).List(h.ctx, opts)
 	}))
-	secretsList, _, err := secretPager.List(h.ctx, metav1.ListOptions{})
-	if err != nil {
-		return err
-	}
+	secretPager.PageSize = secretListPageSize
+
 	i := 0
-	err = meta.EachListItem(secretsList, func(obj runtime.Object) error {
-		if secret, ok := obj.(*corev1.Secret); ok {
-			if _, err := h.secrets.Update(secret); err != nil && !apierrors.IsConflict(err) {
-				return fmt.Errorf("failed to update secret: %v", err)
-			}
-			if i != 0 && i%10 == 0 {
-				h.recorder.Eventf(nodeRef, corev1.EventTypeNormal, secretsProgressEvent, "reencrypted %d secrets", i)
-			}
-			i++
+	if err := secretPager.EachListItem(h.ctx, metav1.ListOptions{}, func(obj runtime.Object) error {
+		secret, ok := obj.(*corev1.Secret)
+		if !ok {
+			return errors.New("failed to convert object to Secret")
 		}
+		if _, err := h.k8s.CoreV1().Secrets(secret.Namespace).Update(h.ctx, secret, metav1.UpdateOptions{}); err != nil && !apierrors.IsConflict(err) {
+			return fmt.Errorf("failed to update secret: %v", err)
+		}
+		if i != 0 && i%50 == 0 {
+			h.recorder.Eventf(nodeRef, corev1.EventTypeNormal, secretsProgressEvent, "reencrypted %d secrets", i)
+		}
+		i++
 		return nil
-	})
-	if err != nil {
+	}); err != nil {
 		return err
 	}
+
 	h.recorder.Eventf(nodeRef, corev1.EventTypeNormal, secretsUpdateCompleteEvent, "completed reencrypt of %d secrets", i)
 	return nil
 }

@@ -6,9 +6,10 @@ replace (
 	github.com/Microsoft/hcsshim => github.com/Microsoft/hcsshim v0.11.0
 	github.com/Mirantis/cri-dockerd => github.com/k3s-io/cri-dockerd v0.3.12-k3s1.30-3 // k3s/release-1.30
 	github.com/cloudnativelabs/kube-router/v2 => github.com/k3s-io/kube-router/v2 v2.1.2
-	github.com/containerd/containerd => github.com/k3s-io/containerd v1.7.17-k3s1
+	github.com/containerd/containerd => github.com/k3s-io/containerd v1.7.20-k3s1
+	github.com/distribution/reference => github.com/distribution/reference v0.5.0
 	github.com/docker/distribution => github.com/docker/distribution v2.8.3+incompatible
-	github.com/docker/docker => github.com/docker/docker v25.0.4+incompatible
+	github.com/docker/docker => github.com/docker/docker v25.0.6+incompatible
 	github.com/emicklei/go-restful/v3 => github.com/emicklei/go-restful/v3 v3.9.0
 	github.com/golang/protobuf => github.com/golang/protobuf v1.5.4
 	github.com/googleapis/gax-go/v2 => github.com/googleapis/gax-go/v2 v2.12.0
@@ -104,7 +105,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/json-iterator/go v1.1.12
 	github.com/k3s-io/helm-controller v0.16.1
-	github.com/k3s-io/kine v0.11.9
+	github.com/k3s-io/kine v0.11.11
 	github.com/klauspost/compress v1.17.7
 	github.com/kubernetes-sigs/cri-tools v0.0.0-00010101000000-000000000000
 	github.com/lib/pq v1.10.2
@@ -122,9 +123,9 @@ require (
 	github.com/prometheus/client_golang v1.19.1
 	github.com/prometheus/common v0.49.0
 	github.com/rancher/dynamiclistener v0.6.0-rc1
-	github.com/rancher/lasso v0.0.0-20240430201833-6f3def65ffc5
+	github.com/rancher/lasso v0.0.0-20240724174736-24ab3dbf26f0
 	github.com/rancher/permissions v0.0.0-20240523180510-4001d3d637f7
-	github.com/rancher/remotedialer v0.3.0
+	github.com/rancher/remotedialer v0.4.1
 	github.com/rancher/wharfie v0.6.4
 	github.com/rancher/wrangler/v3 v3.0.0-rc2
 	github.com/robfig/cron/v3 v3.0.1
@@ -137,11 +138,9 @@ require (
 	github.com/vishvananda/netlink v1.2.1-beta.2
 	github.com/yl2chen/cidranger v1.0.2
 	go.etcd.io/etcd/api/v3 v3.5.13
-	go.etcd.io/etcd/client/pkg/v3 v3.5.13
 	go.etcd.io/etcd/client/v3 v3.5.13
-	go.etcd.io/etcd/etcdutl/v3 v3.5.9
+	go.etcd.io/etcd/etcdutl/v3 v3.5.13
 	go.etcd.io/etcd/server/v3 v3.5.13
-	go.uber.org/zap v1.27.0
 	golang.org/x/crypto v0.23.0
 	golang.org/x/net v0.25.0
 	golang.org/x/sync v0.7.0
@@ -198,15 +197,18 @@ require (
 	github.com/containerd/btrfs/v2 v2.0.0 // indirect
 	github.com/containerd/cgroups v1.1.0 // indirect
 	github.com/containerd/console v1.0.3 // indirect
+	github.com/containerd/containerd/api v1.7.19 // indirect
 	github.com/containerd/continuity v0.4.3 // indirect
+	github.com/containerd/errdefs v0.1.0 // indirect
 	github.com/containerd/fifo v1.1.0 // indirect
 	github.com/containerd/go-cni v1.1.9 // indirect
 	github.com/containerd/go-runc v1.0.0 // indirect
 	github.com/containerd/imgcrypt v1.1.8 // indirect
 	github.com/containerd/log v0.1.0 // indirect
 	github.com/containerd/nri v0.6.1 // indirect
+	github.com/containerd/platforms v0.2.1 // indirect
 	github.com/containerd/stargz-snapshotter/estargz v0.15.1 // indirect
-	github.com/containerd/ttrpc v1.2.4 // indirect
+	github.com/containerd/ttrpc v1.2.5 // indirect
 	github.com/containerd/typeurl v1.0.2 // indirect
 	github.com/containerd/typeurl/v2 v2.1.1 // indirect
 	github.com/containernetworking/cni v1.1.2 // indirect
@@ -214,13 +216,13 @@ require (
 	github.com/containers/ocicrypt v1.1.10 // indirect
 	github.com/coreos/go-oidc v2.2.1+incompatible // indirect
 	github.com/coreos/go-semver v0.3.1 // indirect
-	github.com/cpuguy83/go-md2man/v2 v2.0.3 // indirect
+	github.com/cpuguy83/go-md2man/v2 v2.0.4 // indirect
 	github.com/cyphar/filepath-securejoin v0.2.4 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/daviddengcn/go-colortext v1.0.0 // indirect
 	github.com/davidlazar/go-crypto v0.0.0-20200604182044-b73af7476f6c // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.2.0 // indirect
-	github.com/distribution/reference v0.5.0 // indirect
+	github.com/distribution/reference v0.6.0 // indirect
 	github.com/docker/cli v24.0.7+incompatible // indirect
 	github.com/docker/distribution v2.8.3+incompatible // indirect
 	github.com/docker/docker-credential-helpers v0.7.0 // indirect
@@ -277,11 +279,11 @@ require (
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
-	github.com/hashicorp/go-retryablehttp v0.7.4 // indirect
+	github.com/hashicorp/go-retryablehttp v0.7.7 // indirect
 	github.com/hashicorp/go-version v1.6.0 // indirect
 	github.com/hashicorp/golang-lru v0.5.4 // indirect
 	github.com/hashicorp/golang-lru/arc/v2 v2.0.5 // indirect
-	github.com/hashicorp/golang-lru/v2 v2.0.5 // indirect
+	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/huin/goupnp v1.3.0 // indirect
 	github.com/imdario/mergo v0.3.16 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
@@ -408,14 +410,15 @@ require (
 	github.com/tchap/go-patricia/v2 v2.3.1 // indirect
 	github.com/tidwall/btree v1.6.0 // indirect
 	github.com/tmc/grpc-websocket-proxy v0.0.0-20220101234140-673ab2c3ae75 // indirect
-	github.com/urfave/cli/v2 v2.26.0 // indirect
+	github.com/urfave/cli/v2 v2.27.2 // indirect
 	github.com/vbatts/tar-split v0.11.5 // indirect
 	github.com/vishvananda/netns v0.0.4 // indirect
 	github.com/whyrusleeping/go-keyspace v0.0.0-20160322163242-5b898ac5add1 // indirect
 	github.com/xiang90/probing v0.0.0-20221125231312-a49e3df8f510 // indirect
 	github.com/xlab/treeprint v1.2.0 // indirect
-	github.com/xrash/smetrics v0.0.0-20201216005158-039620a65673 // indirect
-	go.etcd.io/bbolt v1.3.9 // indirect
+	github.com/xrash/smetrics v0.0.0-20240312152122-5f08fbb34913 // indirect
+	go.etcd.io/bbolt v1.3.10 // indirect
+	go.etcd.io/etcd/client/pkg/v3 v3.5.13 // indirect
 	go.etcd.io/etcd/client/v2 v2.305.13 // indirect
 	go.etcd.io/etcd/pkg/v3 v3.5.13 // indirect
 	go.etcd.io/etcd/raft/v3 v3.5.13 // indirect
@@ -436,6 +439,7 @@ require (
 	go.uber.org/fx v1.20.1 // indirect
 	go.uber.org/mock v0.4.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
+	go.uber.org/zap v1.27.0 // indirect
 	golang.org/x/exp v0.0.0-20240222234643-814bf88cf225 // indirect
 	golang.org/x/mod v0.17.0 // indirect
 	golang.org/x/oauth2 v0.17.0 // indirect
