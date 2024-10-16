@@ -23,6 +23,8 @@ type Agent struct {
 	BindAddress              string
 	NodeIP                   cli.StringSlice
 	NodeExternalIP           cli.StringSlice
+	NodeInternalDNS          cli.StringSlice
+	NodeExternalDNS          cli.StringSlice
 	NodeName                 string
 	PauseImage               string
 	Snapshotter              string
@@ -79,6 +81,16 @@ var (
 		Name:  "node-external-ip",
 		Usage: "(agent/networking) IPv4/IPv6 external IP addresses to advertise for node",
 		Value: &AgentConfig.NodeExternalIP,
+	}
+	NodeInternalDNSFlag = &cli.StringSliceFlag{
+		Name:  "node-internal-dns",
+		Usage: "(agent/networking) internal DNS addresses to advertise for node",
+		Value: &AgentConfig.NodeInternalDNS,
+	}
+	NodeExternalDNSFlag = &cli.StringSliceFlag{
+		Name:  "node-external-dns",
+		Usage: "(agent/networking) external DNS addresses to advertise for node",
+		Value: &AgentConfig.NodeExternalDNS,
 	}
 	NodeNameFlag = &cli.StringFlag{
 		Name:        "node-name",
@@ -266,11 +278,14 @@ func NewAgentCommand(action func(ctx *cli.Context) error) cli.Command {
 				EnvVar:      version.ProgramUpper + "_URL",
 				Destination: &AgentConfig.ServerURL,
 			},
+			// Note that this is different from DataDirFlag used elswhere in the CLI,
+			// as this is bound to AgentConfig instead of ServerConfig.
 			&cli.StringFlag{
 				Name:        "data-dir,d",
 				Usage:       "(agent/data) Folder to hold state",
 				Destination: &AgentConfig.DataDir,
 				Value:       "/var/lib/rancher/" + version.Program + "",
+				EnvVar:      version.ProgramUpper + "_DATA_DIR",
 			},
 			NodeNameFlag,
 			WithNodeIDFlag,
@@ -292,6 +307,8 @@ func NewAgentCommand(action func(ctx *cli.Context) error) cli.Command {
 			NodeIPFlag,
 			BindAddressFlag,
 			NodeExternalIPFlag,
+			NodeInternalDNSFlag,
+			NodeExternalDNSFlag,
 			ResolvConfFlag,
 			FlannelIfaceFlag,
 			FlannelConfFlag,

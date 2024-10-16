@@ -280,11 +280,11 @@ can_skip_download_binary() {
     fi
 }
 
-can_skip_download_selinux() {                                                        
-    if [ "${INSTALL_K3S_SKIP_DOWNLOAD}" != true ] && [ "${INSTALL_K3S_SKIP_DOWNLOAD}" != selinux ]; then 
-        return 1                                                                     
-    fi                                                                               
-}  
+can_skip_download_selinux() {
+    if [ "${INSTALL_K3S_SKIP_DOWNLOAD}" != true ] && [ "${INSTALL_K3S_SKIP_DOWNLOAD}" != selinux ]; then
+        return 1
+    fi
+}
 
 # --- verify an executable k3s binary is installed ---
 verify_k3s_is_executable() {
@@ -385,7 +385,7 @@ get_release_version() {
 get_k3s_selinux_version() {
     available_version="k3s-selinux-1.2-2.${rpm_target}.noarch.rpm"
     info "Finding available k3s-selinux versions"
-    
+
     # run verify_downloader in case it binary installation was skipped
     verify_downloader curl || verify_downloader wget || fatal 'Can not find curl or wget for downloading files'
 
@@ -445,7 +445,7 @@ download() {
 download_hash() {
     if [ -n "${INSTALL_K3S_PR}" ]; then
         info "Downloading hash ${GITHUB_PR_URL}"
-        curl -o ${TMP_ZIP} -H "Authorization: Bearer $GITHUB_TOKEN" -L ${GITHUB_PR_URL}
+        curl -s -o ${TMP_ZIP} -H "Authorization: Bearer $GITHUB_TOKEN" -L ${GITHUB_PR_URL}
         unzip -p ${TMP_ZIP} k3s.sha256sum > ${TMP_HASH}
     else
         if [ -n "${INSTALL_K3S_COMMIT}" ]; then
@@ -481,24 +481,35 @@ get_pr_artifact_url() {
         fatal "Installing PR builds requires jq"
     fi
 
+    # Check if unzip is installed
+    if ! [ -x "$(command -v unzip)" ]; then
+        fatal "Installing PR builds requires unzip"
+    fi
+
     if [ -z "${GITHUB_TOKEN}" ]; then
-        fatal "Installing PR builds requires GITHUB_TOKEN with k3s-io/k3s repo authorization"
+        fatal "Installing PR builds requires GITHUB_TOKEN with k3s-io/k3s repo permissions"
     fi
 
     # GET request to the GitHub API to retrieve the latest commit SHA from the pull request
-    commit_id=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" "$github_api_url/pulls/$INSTALL_K3S_PR" | jq -r '.head.sha')
+    set +e
+    commit_id=$(curl -f -s -H "Authorization: Bearer ${GITHUB_TOKEN}" "${github_api_url}/pulls/${INSTALL_K3S_PR}" | jq -r '.head.sha')
+    set -e
+
+    if [ -z "${commit_id}" ]; then
+        fatal "Installing PR builds requires GITHUB_TOKEN with k3s-io/k3s repo permissions"
+    fi
     
     # GET request to the GitHub API to retrieve the Build workflow associated with the commit
-    wf_raw=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" "$github_api_url/commits/$commit_id/check-runs")
-    build_workflow=$(printf "%s" "$wf_raw" | jq -r '.check_runs[] |  select(.name == "build / Build")')
+    wf_raw=$(curl -s -H "Authorization: Bearer ${GITHUB_TOKEN}" "${github_api_url}/commits/${commit_id}/check-runs")
+    build_workflow=$(printf "%s" "${wf_raw}" | jq -r '.check_runs[] |  select(.name == "build / Build")')
     
     # Extract the Run ID from the build workflow and lookup artifacts associated with the run
-    run_id=$(echo "$build_workflow" | jq -r ' .details_url' | awk -F'/' '{print $(NF-2)}' | sort -rn | head -1)
+    run_id=$(echo "${build_workflow}" | jq -r ' .details_url' | awk -F'/' '{print $(NF-2)}' | sort -rn | head -1)
 
     # Extract the artifact ID for the "k3s" artifact    
-    artifacts=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" "$github_api_url/actions/runs/$run_id/artifacts")
-    artifacts_url=$(echo "$artifacts" | jq -r '.artifacts[] | select(.name == "k3s") | .archive_download_url')
-    GITHUB_PR_URL=$artifacts_url
+    artifacts=$(curl -s -H "Authorization: Bearer ${GITHUB_TOKEN}" "${github_api_url}/actions/runs/${run_id}/artifacts")
+    artifacts_url=$(echo "${artifacts}" | jq -r '.artifacts[] | select(.name == "k3s") | .archive_download_url')
+    GITHUB_PR_URL="${artifacts_url}"
 }
 
 # --- download binary from github url ---
@@ -507,7 +518,7 @@ download_binary() {
         # Since Binary and Hash are zipped together, check if TMP_ZIP already exists
         if ! [ -f ${TMP_ZIP} ]; then
             info "Downloading K3s artifact ${GITHUB_PR_URL}"
-            curl -o ${TMP_ZIP} -H "Authorization: Bearer $GITHUB_TOKEN" -L ${GITHUB_PR_URL}
+            curl -s -f -o ${TMP_ZIP} -H "Authorization: Bearer $GITHUB_TOKEN" -L ${GITHUB_PR_URL}
         fi
         # extract k3s binary from zip
         unzip -p ${TMP_ZIP} k3s > ${TMP_BIN}
@@ -541,7 +552,7 @@ setup_binary() {
 
 # --- setup selinux policy ---
 setup_selinux() {
-    case ${INSTALL_K3S_CHANNEL} in 
+    case ${INSTALL_K3S_CHANNEL} in
         *testing)
             rpm_channel=testing
             ;;
@@ -568,15 +579,15 @@ setup_selinux() {
             rpm_site_infix=slemicro
             package_installer=zypper
         fi
-    elif [ "${ID_LIKE:-}" = coreos ] || [ "${VARIANT_ID:-}" = coreos ]; then
+    elif [ "${ID_LIKE:-}" = coreos ] || [ "${VARIANT_ID:-}" = coreos ] || [ "${VARIANT_ID:-}" = "iot" ]; then
         rpm_target=coreos
         rpm_site_infix=coreos
         package_installer=rpm-ostree
-    elif [ "${VERSION_ID%%.*}" = "7" ]; then
+    elif [ "${VERSION_ID%%.*}" = "7" ] || ( [ "${ID:-}" = amzn ] && [ "${VERSION_ID%%.*}" = "2" ] ); then
         rpm_target=el7
         rpm_site_infix=centos/7
         package_installer=yum
-    elif [ "${VERSION_ID%%.*}" = "8" ] || [ "${VERSION_ID%%.*}" -gt "36" ]; then
+    elif [ "${VERSION_ID%%.*}" = "8" ] || [ "${VERSION_ID%%.*}" = "V10" ] || [ "${VERSION_ID%%.*}" -gt "36" ]; then
         rpm_target=el8
         rpm_site_infix=centos/8
         package_installer=yum
@@ -603,12 +614,13 @@ setup_selinux() {
         info "Skipping installation of SELinux RPM"
         return
     fi
-    
+
     get_k3s_selinux_version
     install_selinux_rpm ${rpm_site} ${rpm_channel} ${rpm_target} ${rpm_site_infix}
 
     policy_error=fatal
-    if [ "$INSTALL_K3S_SELINUX_WARN" = true ] || [ "${ID_LIKE:-}" = coreos ] || [ "${VARIANT_ID:-}" = coreos ]; then
+    if [ "$INSTALL_K3S_SELINUX_WARN" = true ] || [ "${ID_LIKE:-}" = coreos ] || 
+       [ "${VARIANT_ID:-}" = coreos ] || [ "${VARIANT_ID:-}" = iot ]; then
         policy_error=warn
     fi
 
@@ -617,7 +629,7 @@ setup_selinux() {
             $policy_error "Failed to apply container_runtime_exec_t to ${BIN_DIR}/k3s, ${policy_hint}"
         fi
     elif [ ! -f /usr/share/selinux/packages/k3s.pp ]; then
-        if [ -x /usr/sbin/transactional-update ] || [ "${ID_LIKE:-}" = coreos ] || [ "${VARIANT_ID:-}" = coreos ]; then
+        if [ -x /usr/sbin/transactional-update ] || [ "${ID_LIKE:-}" = coreos ] || [ "${VARIANT_ID:-}" = coreos ] || [ "${VARIANT_ID:-}" = iot ]; then
             warn "Please reboot your machine to activate the changes and avoid data loss."
         else
             $policy_error "Failed to find the k3s-selinux policy, ${policy_hint}"
@@ -626,7 +638,8 @@ setup_selinux() {
 }
 
 install_selinux_rpm() {
-    if [ -r /etc/redhat-release ] || [ -r /etc/centos-release ] || [ -r /etc/oracle-release ] || [ -r /etc/fedora-release ] || [ "${ID_LIKE%%[ ]*}" = "suse" ]; then
+    if [ -r /etc/redhat-release ] || [ -r /etc/centos-release ] || [ -r /etc/oracle-release ] || 
+       [ -r /etc/fedora-release ] || [ -r /etc/system-release ] || [ "${ID_LIKE%%[ ]*}" = "suse" ]; then
         repodir=/etc/yum.repos.d
         if [ -d /etc/zypp/repos.d ]; then
             repodir=/etc/zypp/repos.d
@@ -656,7 +669,7 @@ EOF
                 : "${INSTALL_K3S_SKIP_START:=true}"
             fi
             # create the /var/lib/rpm-state in SLE systems to fix the prein selinux macro
-            ${transactional_update_run} mkdir -p /var/lib/rpm-state
+            $SUDO ${transactional_update_run} mkdir -p /var/lib/rpm-state
             ;;
         coreos)
             rpm_installer="rpm-ostree --idempotent"
@@ -670,7 +683,7 @@ EOF
         if [ "${rpm_installer}" = "yum" ] && [ -x /usr/bin/dnf ]; then
             rpm_installer=dnf
         fi
-	    if rpm -q --quiet k3s-selinux; then 
+	    if rpm -q --quiet k3s-selinux; then
             # remove k3s-selinux module before upgrade to allow container-selinux to upgrade safely
             if check_available_upgrades container-selinux ${3} && check_available_upgrades k3s-selinux ${3}; then
                 MODULE_PRIORITY=$($SUDO semodule --list=full | grep k3s | cut -f1 -d" ")
@@ -756,7 +769,9 @@ create_killall() {
 #!/bin/sh
 [ $(id -u) -eq 0 ] || exec sudo $0 $@
 
-for bin in /var/lib/rancher/k3s/data/**/bin/; do
+K3S_DATA_DIR=${K3S_DATA_DIR:-/var/lib/rancher/k3s}
+
+for bin in ${K3S_DATA_DIR}/data/**/bin/; do
     [ -d $bin ] && export PATH=$PATH:$bin:$bin/aux
 done
 
@@ -816,7 +831,7 @@ remove_interfaces() {
 }
 
 getshims() {
-    ps -e -o pid= -o args= | sed -e 's/^ *//; s/\s\s*/\t/;' | grep -w 'k3s/data/[^/]*/bin/containerd-shim' | cut -f1
+    ps -e -o pid= -o args= | sed -e 's/^ *//; s/\s\s*/\t/;' | grep -w "${K3S_DATA_DIR}"'/data/[^/]*/bin/containerd-shim' | cut -f1
 }
 
 killtree $({ set +x; } 2>/dev/null; getshims; set -x)
@@ -830,7 +845,6 @@ do_unmount_and_remove() {
 }
 
 do_unmount_and_remove '/run/k3s'
-do_unmount_and_remove '/var/lib/rancher/k3s'
 do_unmount_and_remove '/var/lib/kubelet/pods'
 do_unmount_and_remove '/var/lib/kubelet/plugins'
 do_unmount_and_remove '/run/netns/cni-'
@@ -856,6 +870,8 @@ create_uninstall() {
 #!/bin/sh
 set -x
 [ \$(id -u) -eq 0 ] || exec sudo \$0 \$@
+
+K3S_DATA_DIR=\${K3S_DATA_DIR:-/var/lib/rancher/k3s}
 
 ${KILLALL_K3S_SH}
 
@@ -887,10 +903,29 @@ for cmd in kubectl crictl ctr; do
     fi
 done
 
+clean_mounted_directory() {
+    if ! grep -q " \$1" /proc/mounts; then
+        rm -rf "\$1"
+	return 0
+    fi
+
+    for path in "\$1"/*; do
+        if [ -d "\$path" ]; then
+            if grep -q " \$path" /proc/mounts; then
+                clean_mounted_directory "\$path"
+            else
+                rm -rf "\$path"
+            fi
+        else
+            rm "\$path"
+        fi
+     done
+}
+
 rm -rf /etc/rancher/k3s
 rm -rf /run/k3s
 rm -rf /run/flannel
-rm -rf /var/lib/rancher/k3s
+clean_mounted_directory \${K3S_DATA_DIR}
 rm -rf /var/lib/kubelet
 rm -f ${BIN_DIR}/k3s
 rm -f ${KILLALL_K3S_SH}
@@ -906,7 +941,7 @@ elif type zypper >/dev/null 2>&1; then
     if [ "\${TRANSACTIONAL_UPDATE=false}" != "true" ] && [ -x /usr/sbin/transactional-update ]; then
         uninstall_cmd="transactional-update --no-selfupdate -d run \$uninstall_cmd"
     fi
-    \$uninstall_cmd
+    $SUDO \$uninstall_cmd
     rm -f /etc/zypp/repos.d/rancher-k3s-common*.repo
 fi
 EOF
@@ -1115,4 +1150,3 @@ eval set -- $(escape "${INSTALL_K3S_EXEC}") $(quote "$@")
     create_service_file
     service_enable_and_start
 }
-

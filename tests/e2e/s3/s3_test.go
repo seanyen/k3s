@@ -14,9 +14,9 @@ import (
 )
 
 // Valid nodeOS:
-// generic/ubuntu2310, generic/centos7, generic/rocky8,
-// opensuse/Leap-15.3.x86_64
-var nodeOS = flag.String("nodeOS", "generic/ubuntu2310", "VM operating system")
+// bento/ubuntu-24.04, opensuse/Leap-15.6.x86_64
+// eurolinux-vagrant/rocky-8, eurolinux-vagrant/rocky-9,
+var nodeOS = flag.String("nodeOS", "bento/ubuntu-24.04", "VM operating system")
 var ci = flag.Bool("ci", false, "running on CI")
 var local = flag.Bool("local", false, "deploy a locally built K3s binary")
 
@@ -87,7 +87,31 @@ var _ = Describe("Verify Create", Ordered, func() {
 			fmt.Println(res)
 			Expect(err).NotTo(HaveOccurred())
 		})
-		It("save s3 snapshot", func() {
+		It("save s3 snapshot using CLI", func() {
+			res, err := e2e.RunCmdOnNode("k3s etcd-snapshot save "+
+				"--etcd-s3-insecure=true "+
+				"--etcd-s3-bucket=test-bucket "+
+				"--etcd-s3-folder=test-folder "+
+				"--etcd-s3-endpoint=localhost:9090 "+
+				"--etcd-s3-skip-ssl-verify=true "+
+				"--etcd-s3-access-key=test ",
+				serverNodeNames[0])
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(ContainSubstring("Snapshot on-demand-server-0"))
+		})
+		It("creates s3 config secret", func() {
+			res, err := e2e.RunCmdOnNode("k3s kubectl create secret generic k3s-etcd-s3-config --namespace=kube-system "+
+				"--from-literal=etcd-s3-insecure=true "+
+				"--from-literal=etcd-s3-bucket=test-bucket "+
+				"--from-literal=etcd-s3-folder=test-folder "+
+				"--from-literal=etcd-s3-endpoint=localhost:9090 "+
+				"--from-literal=etcd-s3-skip-ssl-verify=true "+
+				"--from-literal=etcd-s3-access-key=test ",
+				serverNodeNames[0])
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(ContainSubstring("secret/k3s-etcd-s3-config created"))
+		})
+		It("save s3 snapshot using secret", func() {
 			res, err := e2e.RunCmdOnNode("k3s etcd-snapshot save", serverNodeNames[0])
 			Expect(err).NotTo(HaveOccurred())
 			Expect(res).To(ContainSubstring("Snapshot on-demand-server-0"))

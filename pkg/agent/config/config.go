@@ -59,6 +59,8 @@ func Get(ctx context.Context, agent cmds.Agent, proxy proxy.Proxy) (*config.Node
 	// does not support jittering, so we instead use wait.JitterUntilWithContext, and cancel
 	// the context on success.
 	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	wait.JitterUntilWithContext(ctx, func(ctx context.Context) {
 		agentConfig, err = get(ctx, &agent, proxy)
 		if err != nil {
@@ -78,7 +80,7 @@ func KubeProxyDisabled(ctx context.Context, node *config.Node, proxy proxy.Proxy
 	var disabled bool
 	var err error
 
-	wait.PollImmediateUntilWithContext(ctx, 5*time.Second, func(ctx context.Context) (bool, error) {
+	_ = wait.PollUntilContextCancel(ctx, 5*time.Second, true, func(ctx context.Context) (bool, error) {
 		disabled, err = getKubeProxyDisabled(ctx, node, proxy)
 		if err != nil {
 			logrus.Infof("Waiting to retrieve kube-proxy configuration; server is not ready: %v", err)
@@ -96,14 +98,14 @@ func APIServers(ctx context.Context, node *config.Node, proxy proxy.Proxy) []str
 	var addresses []string
 	var err error
 
-	wait.PollImmediateUntilWithContext(ctx, 5*time.Second, func(ctx context.Context) (bool, error) {
+	_ = wait.PollUntilContextCancel(ctx, 5*time.Second, true, func(ctx context.Context) (bool, error) {
 		addresses, err = getAPIServers(ctx, node, proxy)
 		if err != nil {
 			logrus.Infof("Failed to retrieve list of apiservers from server: %v", err)
 			return false, err
 		}
 		if len(addresses) == 0 {
-			logrus.Infof("Waiting for apiserver addresses")
+			logrus.Infof("Waiting for supervisor to provide apiserver addresses")
 			return false, nil
 		}
 		return true, nil
@@ -370,10 +372,9 @@ func get(ctx context.Context, envInfo *cmds.Agent, proxy proxy.Proxy) (*config.N
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to retrieve configuration from server")
 	}
-
 	// If the supervisor and externally-facing apiserver are not on the same port, tell the proxy where to find the apiserver.
 	if controlConfig.SupervisorPort != controlConfig.HTTPSPort {
-		isIPv6 := utilsnet.IsIPv6(net.ParseIP([]string{envInfo.NodeIP.String()}[0]))
+		isIPv6 := utilsnet.IsIPv6(net.ParseIP(util.GetFirstValidIPString(envInfo.NodeIP)))
 		if err := proxy.SetAPIServerPort(controlConfig.HTTPSPort, isIPv6); err != nil {
 			return nil, errors.Wrapf(err, "failed to set apiserver port to %d", controlConfig.HTTPSPort)
 		}
@@ -628,6 +629,18 @@ func get(ctx context.Context, envInfo *cmds.Agent, proxy proxy.Proxy) (*config.N
 	if len(nodeConfig.AgentConfig.NodeExternalIPs) > 0 {
 		nodeConfig.AgentConfig.NodeExternalIP = nodeConfig.AgentConfig.NodeExternalIPs[0].String()
 	}
+
+	var nodeExternalDNSs []string
+	for _, dnsString := range envInfo.NodeExternalDNS.Value() {
+		nodeExternalDNSs = append(nodeExternalDNSs, strings.Split(dnsString, ",")...)
+	}
+	nodeConfig.AgentConfig.NodeExternalDNSs = nodeExternalDNSs
+
+	var nodeInternalDNSs []string
+	for _, dnsString := range envInfo.NodeInternalDNS.Value() {
+		nodeInternalDNSs = append(nodeInternalDNSs, strings.Split(dnsString, ",")...)
+	}
+	nodeConfig.AgentConfig.NodeInternalDNSs = nodeInternalDNSs
 
 	nodeConfig.NoFlannel = nodeConfig.FlannelBackend == config.FlannelBackendNone
 	if !nodeConfig.NoFlannel {

@@ -8,13 +8,13 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/k3s-io/k3s/pkg/generated/controllers/k3s.cattle.io"
 	"github.com/k3s-io/kine/pkg/endpoint"
 	"github.com/rancher/wharfie/pkg/registries"
 	"github.com/rancher/wrangler/v3/pkg/generated/controllers/core"
 	"github.com/rancher/wrangler/v3/pkg/leader"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apiserver/pkg/authentication/authenticator"
 	"k8s.io/client-go/tools/record"
@@ -60,6 +60,21 @@ type Node struct {
 	ServerHTTPSPort          int
 	SupervisorPort           int
 	DefaultRuntime           string
+}
+
+type EtcdS3 struct {
+	AccessKey     string          `json:"accessKey,omitempty"`
+	Bucket        string          `json:"bucket,omitempty"`
+	ConfigSecret  string          `json:"configSecret,omitempty"`
+	Endpoint      string          `json:"endpoint,omitempty"`
+	EndpointCA    string          `json:"endpointCA,omitempty"`
+	Folder        string          `json:"folder,omitempty"`
+	Proxy         string          `json:"proxy,omitempty"`
+	Region        string          `json:"region,omitempty"`
+	SecretKey     string          `json:"secretKey,omitempty"`
+	Insecure      bool            `json:"insecure,omitempty"`
+	SkipSSLVerify bool            `json:"skipSSLVerify,omitempty"`
+	Timeout       metav1.Duration `json:"timeout,omitempty"`
 }
 
 type Containerd struct {
@@ -108,6 +123,8 @@ type Agent struct {
 	NodeIPs                 []net.IP
 	NodeExternalIP          string
 	NodeExternalIPs         []net.IP
+	NodeInternalDNSs        []string
+	NodeExternalDNSs        []string
 	RuntimeSocket           string
 	ImageServiceSocket      string
 	ListenAddress           string
@@ -212,31 +229,19 @@ type Control struct {
 	ClusterInit              bool
 	ClusterReset             bool
 	ClusterResetRestorePath  string
-	EncryptForce             bool
-	EncryptSkip              bool
 	MinTLSVersion            string
 	CipherSuites             []string
-	TLSMinVersion            uint16        `json:"-"`
-	TLSCipherSuites          []uint16      `json:"-"`
-	EtcdSnapshotName         string        `json:"-"`
-	EtcdDisableSnapshots     bool          `json:"-"`
-	EtcdExposeMetrics        bool          `json:"-"`
-	EtcdSnapshotDir          string        `json:"-"`
-	EtcdSnapshotCron         string        `json:"-"`
-	EtcdSnapshotRetention    int           `json:"-"`
-	EtcdSnapshotCompress     bool          `json:"-"`
-	EtcdListFormat           string        `json:"-"`
-	EtcdS3                   bool          `json:"-"`
-	EtcdS3Endpoint           string        `json:"-"`
-	EtcdS3EndpointCA         string        `json:"-"`
-	EtcdS3SkipSSLVerify      bool          `json:"-"`
-	EtcdS3AccessKey          string        `json:"-"`
-	EtcdS3SecretKey          string        `json:"-"`
-	EtcdS3BucketName         string        `json:"-"`
-	EtcdS3Region             string        `json:"-"`
-	EtcdS3Folder             string        `json:"-"`
-	EtcdS3Timeout            time.Duration `json:"-"`
-	EtcdS3Insecure           bool          `json:"-"`
+	TLSMinVersion            uint16   `json:"-"`
+	TLSCipherSuites          []uint16 `json:"-"`
+	EtcdSnapshotName         string   `json:"-"`
+	EtcdDisableSnapshots     bool     `json:"-"`
+	EtcdExposeMetrics        bool     `json:"-"`
+	EtcdSnapshotDir          string   `json:"-"`
+	EtcdSnapshotCron         string   `json:"-"`
+	EtcdSnapshotRetention    int      `json:"-"`
+	EtcdSnapshotCompress     bool     `json:"-"`
+	EtcdListFormat           string   `json:"-"`
+	EtcdS3                   *EtcdS3  `json:"-"`
 	ServerNodeName           string
 	VLevel                   int
 	VModule                  string
@@ -283,18 +288,18 @@ func (c *Control) Loopback(urlSafe bool) string {
 }
 
 type ControlRuntimeBootstrap struct {
-	ETCDServerCA       string
-	ETCDServerCAKey    string
-	ETCDPeerCA         string
-	ETCDPeerCAKey      string
-	ServerCA           string
-	ServerCAKey        string
-	ClientCA           string
-	ClientCAKey        string
-	ServiceKey         string
+	ETCDServerCA       string `rotate:"true"`
+	ETCDServerCAKey    string `rotate:"true"`
+	ETCDPeerCA         string `rotate:"true"`
+	ETCDPeerCAKey      string `rotate:"true"`
+	ServerCA           string `rotate:"true"`
+	ServerCAKey        string `rotate:"true"`
+	ClientCA           string `rotate:"true"`
+	ClientCAKey        string `rotate:"true"`
+	ServiceKey         string `rotate:"true"`
 	PasswdFile         string
-	RequestHeaderCA    string
-	RequestHeaderCAKey string
+	RequestHeaderCA    string `rotate:"true"`
+	RequestHeaderCAKey string `rotate:"true"`
 	IPSECKey           string
 	EncryptionConfig   string
 	EncryptionHash     string
