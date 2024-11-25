@@ -57,6 +57,9 @@ const (
 )
 
 func Prepare(ctx context.Context, nodeConfig *config.Node) error {
+	if err := removeHostLocalDataDir(); err != nil {
+		return err
+	}
 	if err := createCNIConf(nodeConfig.AgentConfig.CNIConfDir, nodeConfig); err != nil {
 		return err
 	}
@@ -257,4 +260,13 @@ func findNetMode(cidrs []*net.IPNet) (int, error) {
 		}
 	}
 	return 0, errors.New("Failed checking netMode")
+}
+
+func removeHostLocalDataDir() error {
+	// reset the host local data dir to ensure ipam data starts fresh
+	err := os.RemoveAll("/var/lib/cni/networks")
+	if err != nil {
+		return errors.Wrap(err, "failed to remove host-local data dir: /var/lib/cni/networks")
+	}
+	return nil
 }
