@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
+	"sync"
 
 	"github.com/gorilla/mux"
 	"github.com/k3s-io/k3s/pkg/agent"
@@ -17,16 +17,18 @@ import (
 	k3smetrics "github.com/k3s-io/k3s/pkg/metrics"
 	"github.com/k3s-io/k3s/pkg/proctitle"
 	"github.com/k3s-io/k3s/pkg/profile"
+	"github.com/k3s-io/k3s/pkg/signals"
 	"github.com/k3s-io/k3s/pkg/spegel"
 	"github.com/k3s-io/k3s/pkg/util"
+	"github.com/k3s-io/k3s/pkg/util/permissions"
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/k3s-io/k3s/pkg/vpn"
-	"github.com/rancher/wrangler/v3/pkg/signals"
+	pkgerrors "github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	"github.com/urfave/cli"
+	"github.com/urfave/cli/v2"
 )
 
-func Run(ctx *cli.Context) error {
+func Run(clx *cli.Context) (rerr error) {
 	// Validate build env
 	cmds.MustValidateGolang()
 
@@ -45,8 +47,26 @@ func Run(ctx *cli.Context) error {
 		return err
 	}
 
-	if runtime.GOOS != "windows" && os.Getuid() != 0 && !cmds.AgentConfig.Rootless {
-		return fmt.Errorf("agent must be run as root, or with --rootless")
+	ctx := signals.SetupSignalContext()
+	wg := &sync.WaitGroup{}
+
+	// If exiting due to an error, ensure that contexts are cancelled so that the
+	// WaitGroup exits.  Otherwise, wait for something else to initiate shutdown.
+	defer func() {
+		if rerr != nil {
+			// do not need to pass the error in here, it will be reported by the CLI error handler
+			signals.RequestShutdown(nil)
+		} else {
+			<-ctx.Done()
+			rerr = ctx.Err()
+		}
+		wg.Wait()
+	}()
+
+	if !cmds.AgentConfig.Rootless {
+		if err := permissions.IsPrivileged(); err != nil {
+			return pkgerrors.WithMessage(err, "agent requires additional privilege if not run with --rootless")
+		}
 	}
 
 	if cmds.AgentConfig.TokenFile != "" {
@@ -69,7 +89,7 @@ func Run(ctx *cli.Context) error {
 		return fmt.Errorf("--server is required")
 	}
 
-	if cmds.AgentConfig.FlannelIface != "" && len(cmds.AgentConfig.NodeIP) == 0 {
+	if cmds.AgentConfig.FlannelIface != "" && len(cmds.AgentConfig.NodeIP.Value()) == 0 {
 		ip, err := util.GetIPFromInterface(cmds.AgentConfig.FlannelIface)
 		if err != nil {
 			return err
@@ -77,7 +97,7 @@ func Run(ctx *cli.Context) error {
 		cmds.AgentConfig.NodeIP.Set(ip)
 	}
 
-	logrus.Info("Starting " + version.Program + " agent " + ctx.App.Version)
+	logrus.Info("Starting " + version.Program + " agent " + clx.App.Version)
 
 	dataDir, err := datadir.LocalHome(cmds.AgentConfig.DataDir, cmds.AgentConfig.Rootless)
 	if err != nil {
@@ -85,12 +105,10 @@ func Run(ctx *cli.Context) error {
 	}
 
 	cfg := cmds.AgentConfig
-	cfg.Debug = ctx.GlobalBool("debug")
+	cfg.Debug = clx.Bool("debug")
 	cfg.DataDir = dataDir
 
-	contextCtx := signals.SetupSignalContext()
-
-	go cmds.WriteCoverage(contextCtx)
+	go cmds.WriteCoverage(ctx)
 	if cfg.VPNAuthFile != "" {
 		cfg.VPNAuth, err = util.ReadFile(cfg.VPNAuthFile)
 		if err != nil {
@@ -127,5 +145,9 @@ func Run(ctx *cli.Context) error {
 		return https.Start(ctx, nodeConfig, nil)
 	}
 
-	return agent.Run(contextCtx, cfg)
+	if err := agent.Run(ctx, wg, cfg); err != nil {
+		return err
+	}
+
+	return nil
 }

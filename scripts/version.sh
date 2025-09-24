@@ -4,23 +4,9 @@ GO=${GO-go}
 ARCH=${ARCH:-$("${GO}" env GOARCH)}
 OS=${OS:-$("${GO}" env GOOS)}
 SUFFIX="-${ARCH}"
-GIT_TAG=$DRONE_TAG
-TREE_STATE=clean
-COMMIT=$DRONE_COMMIT
 
-if [ -d .git ]; then
-    if [ -z "$GIT_TAG" ]; then
-        GIT_TAG=$(git tag -l --contains HEAD | head -n 1)
-    fi
-    if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-        DIRTY="-dirty"
-        TREE_STATE=dirty
-    fi
-
-    COMMIT=$(git log -n3 --pretty=format:"%H %ae" | grep -v ' drone@localhost$' | cut -f1 -d\  | head -1)
-    if [ -z "${COMMIT}" ]; then
-    COMMIT=$(git rev-parse HEAD || true)
-    fi
+if [ -z "$NO_DAPPER" ]; then
+    . ./scripts/git_version.sh
 fi
 
 get-module-version(){
@@ -31,19 +17,19 @@ get-module-path(){
   go list -m -f '{{if .Replace}}{{.Replace.Path}}{{else}}{{.Path}}{{end}}' $1
 }
 
-PKG_CONTAINERD_K3S=$(get-module-path github.com/containerd/containerd)
-VERSION_CONTAINERD=$(get-module-version github.com/containerd/containerd)
+PKG_CONTAINERD_K3S=$(get-module-path github.com/containerd/containerd/v2)
+VERSION_CONTAINERD=$(get-module-version github.com/containerd/containerd/v2)
 if [ -z "$VERSION_CONTAINERD" ]; then
     VERSION_CONTAINERD="v0.0.0"
 fi
 
-VERSION_CRICTL=$(get-module-version github.com/kubernetes-sigs/cri-tools)
+VERSION_CRICTL=$(get-module-version sigs.k8s.io/cri-tools)
 if [ -z "$VERSION_CRICTL" ]; then
     VERSION_CRICTL="v0.0.0"
 fi
 
 VERSION_K8S_K3S=$(get-module-version k8s.io/kubernetes)
-VERSION_K8S=${VERSION_K8S_K3S%"-k3s1"}
+VERSION_K8S=${VERSION_K8S_K3S%-k3s*}
 if [ -z "$VERSION_K8S" ]; then
     VERSION_K8S="v0.0.0"
 fi
@@ -68,15 +54,15 @@ if [ -z "$VERSION_CRI_DOCKERD" ]; then
   VERSION_CRI_DOCKERD="v0.0.0"
 fi
 
-VERSION_CNIPLUGINS="v1.4.0-k3s2"
-VERSION_FLANNEL_PLUGIN="v1.4.0-flannel1"
+VERSION_CNIPLUGINS="v1.7.1-k3s1"
+VERSION_FLANNEL_PLUGIN="v1.7.1-flannel1"
 
 VERSION_KUBE_ROUTER=$(get-module-version github.com/cloudnativelabs/kube-router/v2)
 if [ -z "$VERSION_KUBE_ROUTER" ]; then
     VERSION_KUBE_ROUTER="v0.0.0"
 fi
 
-VERSION_ROOT="v0.13.0"
+VERSION_ROOT="v0.15.0"
 
 DEPENDENCIES_URL="https://raw.githubusercontent.com/kubernetes/kubernetes/${VERSION_K8S}/build/dependencies.yaml"
 VERSION_GOLANG="go"$(curl -sL "${DEPENDENCIES_URL}" | yq e '.dependencies[] | select(.name == "golang: upstream version").version' -)

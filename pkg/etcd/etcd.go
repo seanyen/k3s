@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net"
@@ -12,7 +13,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,13 +26,17 @@ import (
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/daemons/control/deps"
 	"github.com/k3s-io/k3s/pkg/daemons/executor"
+	"github.com/k3s-io/k3s/pkg/etcd/s3"
+	"github.com/k3s-io/k3s/pkg/etcd/snapshot"
 	"github.com/k3s-io/k3s/pkg/server/auth"
+	"github.com/k3s-io/k3s/pkg/signals"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/version"
+	kine "github.com/k3s-io/kine/pkg/app"
 	"github.com/k3s-io/kine/pkg/client"
-	endpoint2 "github.com/k3s-io/kine/pkg/endpoint"
-	cp "github.com/otiai10/copy"
-	"github.com/pkg/errors"
+	"github.com/k3s-io/kine/pkg/endpoint"
+	"github.com/otiai10/copy"
+	pkgerrors "github.com/pkg/errors"
 	certutil "github.com/rancher/dynamiclistener/cert"
 	controllerv1 "github.com/rancher/wrangler/v3/pkg/generated/controllers/core/v1"
 	"github.com/rancher/wrangler/v3/pkg/start"
@@ -40,23 +44,25 @@ import (
 	"github.com/sirupsen/logrus"
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
+	etcdversion "go.etcd.io/etcd/api/v3/version"
 	"go.etcd.io/etcd/client/pkg/v3/logutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.etcd.io/etcd/etcdutl/v3/snapshot"
-	"go.uber.org/zap"
+	"go.etcd.io/etcd/client/v3/credentials"
+	snapshotv3 "go.etcd.io/etcd/etcdutl/v3/snapshot"
+	errorsv3 "go.etcd.io/etcd/server/v3/etcdserver/errors"
+	"go.uber.org/zap/zapcore"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/types"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/kubernetes"
-	nodeHelper "k8s.io/component-helpers/node/util"
-	nodeUtil "k8s.io/kubernetes/pkg/controller/util/node"
 )
 
 const (
-	testTimeout          = time.Second * 30
+	statusTimeout        = time.Second * 30
 	manageTickerTime     = time.Second * 15
 	learnerMaxStallTime  = time.Minute * 5
 	memberRemovalTimeout = time.Minute * 1
@@ -91,10 +97,9 @@ var (
 	NodeAddressAnnotation = "etcd." + version.Program + ".cattle.io/node-address"
 
 	ErrAddressNotSet    = errors.New("apiserver addresses not yet set")
+	ErrJoinTimeout      = errors.New("MemberAdd request timed out")
 	ErrNotMember        = errNotMember()
 	ErrMemberListFailed = errMemberListFailed()
-
-	invalidKeyChars = regexp.MustCompile(`[^-._a-zA-Z0-9]`)
 )
 
 type NodeControllerGetter func() controllerv1.NodeController
@@ -110,8 +115,7 @@ type ETCD struct {
 	name       string
 	address    string
 	cron       *cron.Cron
-	s3         *S3
-	cancel     context.CancelFunc
+	s3         *s3.Controller
 	snapshotMu *sync.Mutex
 }
 
@@ -128,16 +132,16 @@ type Members struct {
 	Members []*etcdserverpb.Member `json:"members"`
 }
 
-type MembershipError struct {
-	Self    string
-	Members []string
+type membershipError struct {
+	self    string
+	members []string
 }
 
-func (e *MembershipError) Error() string {
-	return fmt.Sprintf("this server is a not a member of the etcd cluster. Found %v, expect: %s", e.Members, e.Self)
+func (e *membershipError) Error() string {
+	return fmt.Sprintf("this server is a not a member of the etcd cluster. Found %v, expect: %s", e.members, e.self)
 }
 
-func (e *MembershipError) Is(target error) bool {
+func (e *membershipError) Is(target error) bool {
 	switch target {
 	case ErrNotMember:
 		return true
@@ -145,17 +149,17 @@ func (e *MembershipError) Is(target error) bool {
 	return false
 }
 
-func errNotMember() error { return &MembershipError{} }
+func errNotMember() error { return &membershipError{} }
 
-type MemberListError struct {
-	Err error
+type memberListError struct {
+	err error
 }
 
-func (e *MemberListError) Error() string {
-	return fmt.Sprintf("failed to get MemberList from server: %v", e.Err)
+func (e *memberListError) Error() string {
+	return fmt.Sprintf("failed to get MemberList from server: %v", e.err)
 }
 
-func (e *MemberListError) Is(target error) bool {
+func (e *memberListError) Is(target error) bool {
 	switch target {
 	case ErrMemberListFailed:
 		return true
@@ -163,7 +167,7 @@ func (e *MemberListError) Is(target error) bool {
 	return false
 }
 
-func errMemberListFailed() error { return &MemberListError{} }
+func errMemberListFailed() error { return &memberListError{} }
 
 // NewETCD creates a new value of type
 // ETCD with initialized cron and snapshot mutex values.
@@ -209,35 +213,40 @@ func (e *ETCD) Test(ctx context.Context) error {
 		return errors.New("etcd datastore is not started")
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, testTimeout)
-	defer cancel()
-
-	endpoints := getEndpoints(e.config)
-	status, err := e.client.Status(ctx, endpoints[0])
+	status, err := e.status(ctx)
 	if err != nil {
-		return err
-	}
-
-	if status.IsLearner {
+		return pkgerrors.WithMessage(err, "failed to get etcd status")
+	} else if status.IsLearner {
 		return errors.New("this server has not yet been promoted from learner to voting member")
+	} else if status.Leader == 0 {
+		return errorsv3.ErrNoLeader
 	}
 
-	if err := e.defragment(ctx); err != nil {
-		return errors.Wrap(err, "failed to defragment etcd database")
-	}
-
-	if err := e.clearAlarms(ctx); err != nil {
-		return errors.Wrap(err, "failed to report and disarm etcd alarms")
-	}
-
-	// refresh status to see if any errors remain after clearing alarms
-	status, err = e.client.Status(ctx, endpoints[0])
-	if err != nil {
-		return err
-	}
-
+	logrus.Infof("Connected to etcd v%s - datastore using %d of %d bytes", status.Version, status.DbSizeInUse, status.DbSize)
 	if len(status.Errors) > 0 {
-		return fmt.Errorf("etcd cluster errors: %s", strings.Join(status.Errors, ", "))
+		logrus.Warnf("Errors present on etcd cluster: %s", strings.Join(status.Errors, ","))
+	}
+
+	// defrag this node to reclaim freed space from compacted revisions
+	if err := e.defragment(ctx); err != nil {
+		return pkgerrors.WithMessage(err, "failed to defragment etcd database")
+	}
+
+	// clear alarms on this node
+	if err := e.clearAlarms(ctx, status.Header.MemberId); err != nil {
+		return pkgerrors.WithMessage(err, "failed to disarm etcd alarms")
+	}
+
+	// refresh status - note that errors may remain on other nodes, but this
+	// should not prevent us from continuing with startup.
+	status, err = e.status(ctx)
+	if err != nil {
+		return pkgerrors.WithMessage(err, "failed to get etcd status")
+	}
+
+	logrus.Infof("Datastore using %d of %d bytes after defragment", status.DbSizeInUse, status.DbSize)
+	if len(status.Errors) > 0 {
+		logrus.Warnf("Errors present on etcd cluster after defragment: %s", strings.Join(status.Errors, ","))
 	}
 
 	members, err := e.client.MemberList(ctx)
@@ -245,6 +254,7 @@ func (e *ETCD) Test(ctx context.Context) error {
 		return err
 	}
 
+	// Ensure that there is a cluster member with our peerURL and name
 	var memberNameUrls []string
 	for _, member := range members.Members {
 		for _, peerURL := range member.PeerURLs {
@@ -256,7 +266,9 @@ func (e *ETCD) Test(ctx context.Context) error {
 			memberNameUrls = append(memberNameUrls, member.Name+"="+member.PeerURLs[0])
 		}
 	}
-	return &MembershipError{Members: memberNameUrls, Self: e.name + "=" + e.peerURL()}
+
+	// no matching PeerURL on any Member, return an error that indicates what was expected vs what we found.
+	return &membershipError{members: memberNameUrls, self: e.name + "=" + e.peerURL()}
 }
 
 // dbDir returns the path to dataDir/db/etcd
@@ -322,28 +334,31 @@ func (e *ETCD) IsInitialized() (bool, error) {
 	} else if os.IsNotExist(err) {
 		return false, nil
 	} else {
-		return false, errors.Wrap(err, "invalid state for wal directory "+dir)
+		return false, pkgerrors.WithMessage(err, "invalid state for wal directory "+dir)
 	}
 }
 
 // Reset resets an etcd node to a single node cluster.
-func (e *ETCD) Reset(ctx context.Context, rebootstrap func() error) error {
+func (e *ETCD) Reset(ctx context.Context, wg *sync.WaitGroup, rebootstrap func() error) error {
 	// Wait for etcd to come up as a new single-node cluster, then exit
+	wg.Add(1)
 	go func() {
-		<-e.config.Runtime.ContainerRuntimeReady
-		t := time.NewTicker(5 * time.Second)
-		defer t.Stop()
-		for range t.C {
+		defer wg.Done()
+		if executor.IsSelfHosted() {
+			// if the executor requires cri/kubelet to be up to run etcd, wait for container runtime
+			<-executor.CRIReadyChan()
+		}
+		wait.PollUntilContextCancel(ctx, time.Second*5, true, func(ctx context.Context) (bool, error) {
 			if err := e.Test(ctx); err == nil {
 				// reset the apiaddresses to nil since we are doing a restoration
 				if _, err := e.client.Put(ctx, AddressKey, ""); err != nil {
 					logrus.Warnf("failed to reset api addresses key in etcd: %v", err)
-					continue
+					return false, nil
 				}
 
 				members, err := e.client.MemberList(ctx)
 				if err != nil {
-					continue
+					return false, nil
 				}
 
 				if rebootstrap != nil {
@@ -359,30 +374,28 @@ func (e *ETCD) Reset(ctx context.Context, rebootstrap func() error) error {
 				}
 
 				if len(members.Members) == 1 && members.Members[0].Name == e.name {
-					// Cancel the etcd server context and allow it time to shutdown cleanly.
-					// Ideally we would use a waitgroup and properly sequence shutdown of the various components.
-					e.cancel()
-					time.Sleep(time.Second * 5)
-					logrus.Infof("Managed etcd cluster membership has been reset, restart without --cluster-reset flag now. Backup and delete ${datadir}/server/db on each peer etcd server and rejoin the nodes")
-					os.Exit(0)
+					// Cancel the process context so that it will shut down.
+					signals.RequestShutdown(errors.New("Managed etcd cluster membership has been reset, restart without --cluster-reset flag now. Backup and delete ${datadir}/server/db on each peer etcd server and rejoin the nodes"))
+					return true, nil
 				}
-			} else {
+			} else if e.client != nil {
 				// make sure that peer ips are updated to the node ip in case the test fails
 				members, err := e.client.MemberList(ctx)
 				if err != nil {
 					logrus.Warnf("failed to list etcd members: %v", err)
-					continue
+					return false, nil
 				}
 				if len(members.Members) > 1 {
 					logrus.Warnf("failed to update peer url: etcd still has more than one member")
-					continue
+					return false, nil
 				}
 				if _, err := e.client.MemberUpdate(ctx, members.Members[0].ID, []string{e.peerURL()}); err != nil {
 					logrus.Warnf("failed to update peer url: %v", err)
-					continue
+					return false, nil
 				}
 			}
-		}
+			return false, nil
+		})
 	}()
 
 	if err := e.startClient(ctx); err != nil {
@@ -391,14 +404,25 @@ func (e *ETCD) Reset(ctx context.Context, rebootstrap func() error) error {
 
 	// If asked to restore from a snapshot, do so
 	if e.config.ClusterResetRestorePath != "" {
-		if e.config.EtcdS3 {
+		if e.config.EtcdS3 != nil {
 			logrus.Infof("Retrieving etcd snapshot %s from S3", e.config.ClusterResetRestorePath)
-			if err := e.initS3IfNil(ctx); err != nil {
-				return err
+			s3client, err := e.getS3Client(ctx)
+			if err != nil {
+				if errors.Is(err, s3.ErrNoConfigSecret) {
+					return errors.New("cannot use S3 config secret when restoring snapshot; configuration must be set in CLI or config file")
+				} else {
+					return pkgerrors.WithMessage(err, "failed to initialize S3 client")
+				}
 			}
-			if err := e.s3.Download(ctx); err != nil {
-				return err
+			dir, err := snapshotDir(e.config, true)
+			if err != nil {
+				return pkgerrors.WithMessage(err, "failed to get the snapshot dir")
 			}
+			path, err := s3client.Download(ctx, e.config.ClusterResetRestorePath, dir)
+			if err != nil {
+				return pkgerrors.WithMessage(err, "failed to download snapshot from S3")
+			}
+			e.config.ClusterResetRestorePath = path
 			logrus.Infof("S3 download complete for %s", e.config.ClusterResetRestorePath)
 		}
 
@@ -422,14 +446,14 @@ func (e *ETCD) Reset(ctx context.Context, rebootstrap func() error) error {
 		return err
 	}
 
-	return e.newCluster(ctx, true)
+	return e.newCluster(ctx, wg, true)
 }
 
 // Start starts the datastore
-func (e *ETCD) Start(ctx context.Context, clientAccessInfo *clientaccess.Info) error {
+func (e *ETCD) Start(ctx context.Context, wg *sync.WaitGroup, clientAccessInfo *clientaccess.Info) error {
 	isInitialized, err := e.IsInitialized()
 	if err != nil {
-		return errors.Wrapf(err, "failed to check for initialized etcd datastore")
+		return pkgerrors.WithMessagef(err, "failed to check for initialized etcd datastore")
 	}
 
 	if err := e.startClient(ctx); err != nil {
@@ -442,6 +466,7 @@ func (e *ETCD) Start(ctx context.Context, clientAccessInfo *clientaccess.Info) e
 	}
 
 	go e.manageLearners(ctx)
+	go e.getS3Client(ctx)
 
 	if isInitialized {
 		// check etcd dir permission
@@ -460,45 +485,52 @@ func (e *ETCD) Start(ctx context.Context, clientAccessInfo *clientaccess.Info) e
 			return err
 		}
 		logrus.Infof("Starting etcd for existing cluster member")
-		return e.cluster(ctx, false, opt)
+		return e.cluster(ctx, wg, false, opt)
 	}
 
 	if clientAccessInfo == nil {
-		return e.newCluster(ctx, false)
+		return e.newCluster(ctx, wg, false)
 	}
 
+	wg.Add(1)
 	go func() {
-		for {
-			select {
-			case <-time.After(30 * time.Second):
-				logrus.Infof("Waiting for container runtime to become ready before joining etcd cluster")
-			case <-e.config.Runtime.ContainerRuntimeReady:
-				if err := wait.PollImmediateUntilWithContext(ctx, time.Second, func(ctx context.Context) (bool, error) {
-					if err := e.join(ctx, clientAccessInfo); err != nil {
-						// Retry the join if waiting for another member to be promoted, or waiting for peers to connect after promotion
-						if errors.Is(err, rpctypes.ErrTooManyLearners) || errors.Is(err, rpctypes.ErrUnhealthy) {
-							logrus.Infof("Waiting for other members to finish joining etcd cluster: %v", err)
-							return false, nil
-						}
-						// Retry the join if waiting to retrieve the member list from the server
-						if errors.Is(err, ErrMemberListFailed) {
-							logrus.Infof("Waiting to retrieve etcd cluster member list: %v", err)
-							return false, nil
-						}
-						return false, err
-					}
-					return true, nil
-				}); err != nil {
-					logrus.Fatalf("etcd cluster join failed: %v", err)
-				}
-				return
-			case <-ctx.Done():
-				return
-			}
+		defer wg.Done()
+		if executor.IsSelfHosted() {
+			// if the executor requires cri/kubelet to be up to run etcd, wait for container runtime
+			<-executor.CRIReadyChan()
 		}
+		// pollJoin blocks until the join is successful, or times out and initiates shutdown
+		e.pollJoin(ctx, wg, clientAccessInfo)
 	}()
 
 	return nil
+}
+
+// pollJoin retries the etcd cluster join operation, handling the various
+// non-fatal error conditions that may be preventing it from joining.
+func (e *ETCD) pollJoin(ctx context.Context, wg *sync.WaitGroup, clientAccessInfo *clientaccess.Info) {
+	if err := wait.PollUntilContextCancel(ctx, time.Second, true, func(ctx context.Context) (bool, error) {
+		if err := e.join(ctx, wg, clientAccessInfo); err != nil {
+			// Retry the join if waiting for another member to be promoted, or waiting for peers to connect after promotion
+			if errors.Is(err, rpctypes.ErrTooManyLearners) || errors.Is(err, rpctypes.ErrUnhealthy) {
+				logrus.Infof("Waiting for other members to finish joining etcd cluster: %v", err)
+				return false, nil
+			}
+			// Retry the join if waiting to retrieve the member list from the server
+			if errors.Is(err, ErrMemberListFailed) {
+				logrus.Infof("Waiting to retrieve etcd cluster member list: %v", err)
+				return false, nil
+			}
+			if errors.Is(err, ErrJoinTimeout) {
+				logrus.Infof("Retrying etcd cluster join: %v", err)
+				return false, nil
+			}
+			return false, err
+		}
+		return true, nil
+	}); err != nil {
+		signals.RequestShutdown(pkgerrors.WithMessage(err, "etcd cluster join failed"))
+	}
 }
 
 // startClient sets up the config's datastore endpoints, and starts an etcd client connected to the server endpoint.
@@ -514,7 +546,7 @@ func (e *ETCD) startClient(ctx context.Context) error {
 	e.config.Datastore.BackendTLSConfig.CertFile = e.config.Runtime.ClientETCDCert
 	e.config.Datastore.BackendTLSConfig.KeyFile = e.config.Runtime.ClientETCDKey
 
-	client, err := getClient(ctx, e.config, endpoints...)
+	client, conn, err := getClient(ctx, e.config, endpoints...)
 	if err != nil {
 		return err
 	}
@@ -522,20 +554,33 @@ func (e *ETCD) startClient(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
-		client := e.client
 		e.client = nil
-		client.Close()
+		conn.Close()
 	}()
 
 	return nil
 }
 
+// moveLeader transfers leadership to another cluster member. The request must be made directly
+// to the current leader.
+func (e *ETCD) moveLeader(ctx context.Context, from, to *etcdserverpb.Member) error {
+	client, conn, err := getClient(ctx, e.config, from.ClientURLs...)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	logrus.Infof("Moving etcd cluster leader from %s to %s", from.Name, to.Name)
+	_, err = client.MoveLeader(ctx, to.ID)
+	return err
+}
+
 // join attempts to add a member to an existing cluster
-func (e *ETCD) join(ctx context.Context, clientAccessInfo *clientaccess.Info) error {
+func (e *ETCD) join(ctx context.Context, wg *sync.WaitGroup, clientAccessInfo *clientaccess.Info) error {
 	clientCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
 	var (
+		state   string
 		cluster []string
 		add     = true
 	)
@@ -545,11 +590,11 @@ func (e *ETCD) join(ctx context.Context, clientAccessInfo *clientaccess.Info) er
 		return err
 	}
 
-	client, err := getClient(clientCtx, e.config, clientURLs...)
+	client, conn, err := getClient(clientCtx, e.config, clientURLs...)
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer conn.Close()
 
 	for _, member := range memberList.Members {
 		for _, peer := range member.PeerURLs {
@@ -594,15 +639,25 @@ func (e *ETCD) join(ctx context.Context, clientAccessInfo *clientaccess.Info) er
 	if add {
 		logrus.Infof("Adding member %s=%s to etcd cluster %v", e.name, e.peerURL(), cluster)
 		if _, err = client.MemberAddAsLearner(clientCtx, []string{e.peerURL()}); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return ErrJoinTimeout
+			}
 			return err
 		}
 		cluster = append(cluster, fmt.Sprintf("%s=%s", e.name, e.peerURL()))
+		state = "existing"
+	} else if len(cluster) > 1 {
+		logrus.Infof("Starting etcd to join cluster with members %v", cluster)
+		state = "existing"
+	} else {
+		logrus.Infof("Starting etcd for new cluster")
+		state = "new"
 	}
 
-	logrus.Infof("Starting etcd to join cluster with members %v", cluster)
-	return e.cluster(ctx, false, executor.InitialOptions{
-		Cluster: strings.Join(cluster, ","),
-		State:   "existing",
+	return e.cluster(ctx, wg, false, executor.InitialOptions{
+		AdvertisePeerURL: e.peerURL(),
+		Cluster:          strings.Join(cluster, ","),
+		State:            state,
 	})
 }
 
@@ -618,6 +673,13 @@ func (e *ETCD) Register(handler http.Handler) (http.Handler, error) {
 	// is being removed from the cluster.
 	if !e.config.DisableAPIServer {
 		e.config.Runtime.LeaderElectedClusterControllerStarts[version.Program+"-etcd"] = func(ctx context.Context) {
+			// ensure client is started, as etcd startup may not have handled this if this is a control-plane-only node
+			if e.client == nil {
+				if err := e.startClient(ctx); err != nil {
+					panic(pkgerrors.WithMessage(err, "failed to start etcd client"))
+				}
+			}
+
 			registerEndpointsHandlers(ctx, e)
 			registerMemberHandlers(ctx, e)
 			registerSnapshotHandlers(ctx, e)
@@ -625,7 +687,7 @@ func (e *ETCD) Register(handler http.Handler) (http.Handler, error) {
 			// Re-run informer factory startup after core and leader-elected controllers have started.
 			// Additional caches may need to start for the newly added OnChange/OnRemove callbacks.
 			if err := start.All(ctx, 5, e.config.Runtime.K3s, e.config.Runtime.Core); err != nil {
-				panic(errors.Wrap(err, "failed to start wrangler controllers"))
+				panic(pkgerrors.WithMessage(err, "failed to start wrangler controllers"))
 			}
 		}
 	}
@@ -687,11 +749,15 @@ func (e *ETCD) handler(next http.Handler) http.Handler {
 }
 
 // infoHandler returns etcd cluster information. This is used by new members when joining the cluster.
-// If we can't retrieve an actual MemberList from etcd, we return a canned response with only the local node listed.
 func (e *ETCD) infoHandler() http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodGet {
 			util.SendError(fmt.Errorf("method not allowed"), rw, req, http.StatusMethodNotAllowed)
+			return
+		}
+
+		if e.client == nil {
+			util.SendError(errors.New("failed to get etcd MemberList: etcd not started"), rw, req, http.StatusInternalServerError)
 			return
 		}
 
@@ -700,7 +766,7 @@ func (e *ETCD) infoHandler() http.Handler {
 
 		members, err := e.client.MemberList(ctx)
 		if err != nil {
-			util.SendError(errors.Wrap(err, "failed to get etcd MemberList"), rw, req, http.StatusInternalServerError)
+			util.SendError(pkgerrors.WithMessage(err, "failed to get etcd MemberList"), rw, req, http.StatusInternalServerError)
 			return
 		}
 
@@ -716,13 +782,53 @@ func (e *ETCD) infoHandler() http.Handler {
 // If the runtime config does not list any endpoints, the default endpoint is used.
 // The returned client should be closed when no longer needed, in order to avoid leaking GRPC
 // client goroutines.
-func getClient(ctx context.Context, control *config.Control, endpoints ...string) (*clientv3.Client, error) {
-	cfg, err := getClientConfig(ctx, control, endpoints...)
+func getClient(ctx context.Context, control *config.Control, endpoints ...string) (*clientv3.Client, *grpc.ClientConn, error) {
+	logger, err := logutil.CreateDefaultZapLogger(zapcore.DebugLevel)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return clientv3.New(*cfg)
+	cfg, err := getClientConfig(ctx, control, endpoints...)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Set up dialer and resolver options.
+	// This is normally handled by clientv3.New() but that wraps all the GRPC
+	// service with retry handlers and uses deprecated grpc.DialContext() which
+	// tries to establish a connection even when one isn't wanted.
+	if cfg.DialKeepAliveTime > 0 {
+		params := keepalive.ClientParameters{
+			Time:                cfg.DialKeepAliveTime,
+			Timeout:             cfg.DialKeepAliveTimeout,
+			PermitWithoutStream: cfg.PermitWithoutStream,
+		}
+		cfg.DialOptions = append(cfg.DialOptions, grpc.WithKeepaliveParams(params))
+	}
+
+	if cfg.TLS != nil {
+		creds := credentials.NewTransportCredential(cfg.TLS)
+		cfg.DialOptions = append(cfg.DialOptions, grpc.WithTransportCredentials(creds))
+	} else {
+		cfg.DialOptions = append(cfg.DialOptions, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+
+	cfg.DialOptions = append(cfg.DialOptions, grpc.WithResolvers(NewSimpleResolver(cfg.Endpoints[0])))
+
+	target := fmt.Sprintf("%s://%p/%s", scheme, cfg, authority(cfg.Endpoints[0]))
+	conn, err := grpc.NewClient(target, cfg.DialOptions...)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Create a new client and wire up the GRPC service interfaces.
+	// Ref: https://github.com/etcd-io/etcd/blob/v3.5.16/client/v3/client.go#L87
+	client := clientv3.NewCtxClient(ctx, clientv3.WithZapLogger(logger.Named(version.Program+"-etcd-client")))
+	client.Cluster = clientv3.NewClusterFromClusterClient(etcdserverpb.NewClusterClient(conn), client)
+	client.KV = clientv3.NewKVFromKVClient(etcdserverpb.NewKVClient(conn), client)
+	client.Maintenance = clientv3.NewMaintenanceFromMaintenanceClient(etcdserverpb.NewMaintenanceClient(conn), client)
+
+	return client, conn, nil
 }
 
 // getClientConfig generates an etcd client config connected to the specified endpoints.
@@ -795,10 +901,11 @@ func getAdvertiseAddress(advertiseIP string) (string, error) {
 	return ip, nil
 }
 
-// newCluster returns options to set up etcd for a new cluster
-func (e *ETCD) newCluster(ctx context.Context, reset bool) error {
+// newCluster calls cluster to start up etcd for a new cluster, with no existing members.
+// Existing data from sqlite is migrated over, if present.
+func (e *ETCD) newCluster(ctx context.Context, wg *sync.WaitGroup, reset bool) error {
 	logrus.Infof("Starting etcd for new cluster, cluster-reset=%v", reset)
-	err := e.cluster(ctx, reset, executor.InitialOptions{
+	err := e.cluster(ctx, wg, reset, executor.InitialOptions{
 		AdvertisePeerURL: e.peerURL(),
 		Cluster:          fmt.Sprintf("%s=%s", e.name, e.peerURL()),
 		State:            "new",
@@ -827,14 +934,12 @@ func (e *ETCD) migrateFromSQLite(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	_, err = endpoint2.Listen(ctx, endpoint2.Config{
-		Endpoint: endpoint2.SQLiteBackend,
-	})
+	_, err = endpoint.Listen(ctx, DefaultEndpointConfig())
 	if err != nil {
 		return err
 	}
 
-	sqliteClient, err := client.New(endpoint2.ETCDConfig{
+	sqliteClient, err := client.New(endpoint.ETCDConfig{
 		Endpoints: []string{"unix://kine.sock"},
 	})
 	if err != nil {
@@ -842,11 +947,11 @@ func (e *ETCD) migrateFromSQLite(ctx context.Context) error {
 	}
 	defer sqliteClient.Close()
 
-	etcdClient, err := getClient(ctx, e.config)
+	etcdClient, conn, err := getClient(ctx, e.config)
 	if err != nil {
 		return err
 	}
-	defer etcdClient.Close()
+	defer conn.Close()
 
 	values, err := sqliteClient.List(ctx, "/registry/", 0)
 	if err != nil {
@@ -924,9 +1029,8 @@ func (e *ETCD) listenClientHTTPURLs() string {
 }
 
 // cluster calls the executor to start etcd running with the provided configuration.
-func (e *ETCD) cluster(ctx context.Context, reset bool, options executor.InitialOptions) error {
-	ctx, e.cancel = context.WithCancel(ctx)
-	return executor.ETCD(ctx, executor.ETCDConfig{
+func (e *ETCD) cluster(ctx context.Context, wg *sync.WaitGroup, reset bool, options executor.InitialOptions) error {
+	return executor.ETCD(ctx, wg, &executor.ETCDConfig{
 		Name:                e.name,
 		InitialOptions:      options,
 		ForceNewCluster:     reset,
@@ -953,13 +1057,16 @@ func (e *ETCD) cluster(ctx context.Context, reset bool, options executor.Initial
 		Logger:               "zap",
 		LogOutputs:           []string{"stderr"},
 		ListenClientHTTPURLs: e.listenClientHTTPURLs(),
-
+		SocketOpts: executor.ETCDSocketOpts{
+			ReuseAddress: true,
+			ReusePort:    true,
+		},
 		ExperimentalInitialCorruptCheck:         true,
 		ExperimentalWatchProgressNotifyInterval: e.config.Datastore.NotifyInterval,
-	}, e.config.ExtraEtcdArgs)
+	}, e.config.ExtraEtcdArgs, e.Test)
 }
 
-func (e *ETCD) StartEmbeddedTemporary(ctx context.Context) error {
+func (e *ETCD) StartEmbeddedTemporary(ctx context.Context, wg *sync.WaitGroup) error {
 	etcdDataDir := dbDir(e.config)
 	tmpDataDir := etcdDataDir + "-tmp"
 	os.RemoveAll(tmpDataDir)
@@ -975,7 +1082,7 @@ func (e *ETCD) StartEmbeddedTemporary(ctx context.Context) error {
 		return errors.New("etcd datastore already started")
 	}
 
-	client, err := getClient(ctx, e.config)
+	client, conn, err := getClient(ctx, e.config)
 	if err != nil {
 		return err
 	}
@@ -983,12 +1090,11 @@ func (e *ETCD) StartEmbeddedTemporary(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
-		client := e.client
 		e.client = nil
-		client.Close()
+		conn.Close()
 	}()
 
-	if err := cp.Copy(etcdDataDir, tmpDataDir, cp.Options{PreserveOwner: true}); err != nil {
+	if err := copy.Copy(etcdDataDir, tmpDataDir, copy.Options{PreserveOwner: true}); err != nil {
 		return err
 	}
 
@@ -1006,8 +1112,7 @@ func (e *ETCD) StartEmbeddedTemporary(ctx context.Context) error {
 	}
 
 	embedded := executor.Embedded{}
-	ctx, e.cancel = context.WithCancel(ctx)
-	return embedded.ETCD(ctx, executor.ETCDConfig{
+	return embedded.ETCD(ctx, wg, &executor.ETCDConfig{
 		InitialOptions:       executor.InitialOptions{AdvertisePeerURL: peerURL},
 		DataDir:              tmpDataDir,
 		ForceNewCluster:      true,
@@ -1016,15 +1121,18 @@ func (e *ETCD) StartEmbeddedTemporary(ctx context.Context) error {
 		ListenClientHTTPURLs: clientHTTPURL,
 		ListenPeerURLs:       peerURL,
 		Logger:               "zap",
+		LogOutputs:           []string{"stderr"},
 		HeartbeatInterval:    500,
 		ElectionTimeout:      5000,
 		SnapshotCount:        10000,
 		Name:                 e.name,
-		LogOutputs:           []string{"stderr"},
-
+		SocketOpts: executor.ETCDSocketOpts{
+			ReuseAddress: true,
+			ReusePort:    true,
+		},
 		ExperimentalInitialCorruptCheck:         true,
 		ExperimentalWatchProgressNotifyInterval: e.config.Datastore.NotifyInterval,
-	}, append(e.config.ExtraEtcdArgs, "--max-snapshots=0", "--max-wals=0"))
+	}, append(e.config.ExtraEtcdArgs, "--max-snapshots=0", "--max-wals=0"), e.Test)
 }
 
 func addPort(address string, offset int) (string, error) {
@@ -1049,6 +1157,16 @@ func (e *ETCD) RemovePeer(ctx context.Context, name, address string, allowSelfRe
 		return err
 	}
 
+	// build a quick list of potential other leaders, in case we need to transfer
+	// leadership from the peer to be removed.
+	otherMembers := []*etcdserverpb.Member{}
+	for _, member := range members.Members {
+		if !member.IsLearner && member.Name != name {
+			otherMembers = append(otherMembers, member)
+		}
+	}
+
+	// find and remove the selected peer, after moving leadership if necessary
 	for _, member := range members.Members {
 		if member.Name != name {
 			continue
@@ -1062,8 +1180,20 @@ func (e *ETCD) RemovePeer(ctx context.Context, name, address string, allowSelfRe
 				if e.address == address && !allowSelfRemoval {
 					return errors.New("not removing self from etcd cluster")
 				}
+				status, err := e.status(ctx)
+				if err != nil {
+					return err
+				}
+				if status.Leader == member.ID {
+					if len(otherMembers) == 0 {
+						return rpctypes.ErrMemberNotEnoughStarted
+					}
+					if err := e.moveLeader(ctx, member, otherMembers[0]); err != nil {
+						return err
+					}
+				}
 				logrus.Infof("Removing name=%s id=%d address=%s from etcd", member.Name, member.ID, address)
-				_, err := e.client.MemberRemove(ctx, member.ID)
+				_, err = e.client.MemberRemove(ctx, member.ID)
 				if errors.Is(err, rpctypes.ErrGRPCMemberNotFound) {
 					return nil
 				}
@@ -1079,44 +1209,38 @@ func (e *ETCD) RemovePeer(ctx context.Context, name, address string, allowSelfRe
 // being promoted to full voting member. The checks only run on the cluster member that is
 // the etcd leader.
 func (e *ETCD) manageLearners(ctx context.Context) {
-	<-e.config.Runtime.ContainerRuntimeReady
-	t := time.NewTicker(manageTickerTime)
-	defer t.Stop()
-
-	for range t.C {
+	if executor.IsSelfHosted() {
+		// if the executor requires cri/kubelet to be up to run etcd, wait for container runtime
+		<-executor.CRIReadyChan()
+	}
+	wait.UntilWithContext(ctx, func(ctx context.Context) {
 		ctx, cancel := context.WithTimeout(ctx, manageTickerTime)
 		defer cancel()
 
 		// Check to see if the local node is the leader. Only the leader should do learner management.
 		if e.client == nil {
 			logrus.Debug("Etcd client was nil")
-			continue
+			return
 		}
 
 		endpoints := getEndpoints(e.config)
 		if status, err := e.client.Status(ctx, endpoints[0]); err != nil {
 			logrus.Errorf("Failed to check local etcd status for learner management: %v", err)
-			continue
+			return
 		} else if status.Header.MemberId != status.Leader {
-			continue
+			return
 		}
 
 		progress, err := e.getLearnerProgress(ctx)
 		if err != nil {
 			logrus.Errorf("Failed to get recorded learner progress from etcd: %v", err)
-			continue
+			return
 		}
 
 		members, err := e.client.MemberList(ctx)
 		if err != nil {
 			logrus.Errorf("Failed to get etcd members for learner management: %v", err)
-			continue
-		}
-
-		client, err := util.GetClientSet(e.config.Runtime.KubeConfigSupervisor)
-		if err != nil {
-			logrus.Errorf("Failed to get k8s client for patch node status condition: %v", err)
-			continue
+			return
 		}
 
 		nodes, err := e.getETCDNodes()
@@ -1161,19 +1285,19 @@ func (e *ETCD) manageLearners(ctx context.Context) {
 				status = StatusUnhealthy
 			}
 
-			if err := e.setEtcdStatusCondition(node, client, member.Name, status, message); err != nil {
+			if err := e.setEtcdStatusCondition(node, member.Name, status, message); err != nil {
 				logrus.Errorf("Unable to set etcd status condition %s: %v", member.Name, err)
 			}
 		}
 
 		for nodeName, node := range nodesMap {
 			if !nodeIsMember[nodeName] {
-				if err := e.setEtcdStatusCondition(node, client, nodeName, StatusUnjoined, ""); err != nil {
+				if err := e.setEtcdStatusCondition(node, nodeName, StatusUnjoined, ""); err != nil {
 					logrus.Errorf("Unable to set etcd status condition for a node that is not a cluster member %s: %v", nodeName, err)
 				}
 			}
 		}
-	}
+	}, manageTickerTime)
 }
 
 func (e *ETCD) getETCDNodes() ([]*v1.Node, error) {
@@ -1242,11 +1366,9 @@ func (e *ETCD) trackLearnerProgress(ctx context.Context, progress *learnerProgre
 }
 
 func (e *ETCD) getETCDStatus(ctx context.Context, url string) (*clientv3.StatusResponse, error) {
-	ctx, cancel := context.WithTimeout(ctx, defaultDialTimeout)
-	defer cancel()
 	resp, err := e.client.Status(ctx, url)
 	if err != nil {
-		return resp, errors.Wrap(err, "failed to check etcd member status")
+		return resp, pkgerrors.WithMessage(err, "failed to check etcd member status")
 	}
 	if len(resp.Errors) != 0 {
 		return resp, errors.New("etcd member has status errors: " + strings.Join(resp.Errors, ","))
@@ -1254,7 +1376,7 @@ func (e *ETCD) getETCDStatus(ctx context.Context, url string) (*clientv3.StatusR
 	return resp, nil
 }
 
-func (e *ETCD) setEtcdStatusCondition(node *v1.Node, client kubernetes.Interface, memberName string, memberStatus MemberStatus, message string) error {
+func (e *ETCD) setEtcdStatusCondition(node *v1.Node, memberName string, memberStatus MemberStatus, message string) error {
 	var newCondition v1.NodeCondition
 	switch memberStatus {
 	case StatusLearner:
@@ -1294,7 +1416,7 @@ func (e *ETCD) setEtcdStatusCondition(node *v1.Node, client kubernetes.Interface
 		newCondition.Message = message
 	}
 
-	if find, condition := nodeUtil.GetNodeCondition(&node.Status, etcdStatusType); find >= 0 {
+	if find, condition := util.GetNodeCondition(&node.Status, etcdStatusType); find >= 0 {
 
 		// if the condition is not changing, we only want to update the last heartbeat time
 		if condition.Status == newCondition.Status && condition.Reason == newCondition.Reason && condition.Message == newCondition.Message {
@@ -1306,21 +1428,18 @@ func (e *ETCD) setEtcdStatusCondition(node *v1.Node, client kubernetes.Interface
 				return nil
 			}
 
-			condition.LastHeartbeatTime = metav1.Now()
-			return nodeHelper.SetNodeCondition(client, types.NodeName(node.Name), *condition)
+			return util.SetNodeCondition(e.config.Runtime.Core, node.Name, *condition)
 		}
 
 		logrus.Debugf("Node %s is changing etcd status condition", memberName)
 		condition = &newCondition
-		condition.LastHeartbeatTime = metav1.Now()
 		condition.LastTransitionTime = metav1.Now()
-		return nodeHelper.SetNodeCondition(client, types.NodeName(node.Name), *condition)
+		return util.SetNodeCondition(e.config.Runtime.Core, node.Name, *condition)
 	}
 
 	logrus.Infof("Adding node %s etcd status condition", memberName)
-	newCondition.LastHeartbeatTime = metav1.Now()
 	newCondition.LastTransitionTime = metav1.Now()
-	return nodeHelper.SetNodeCondition(client, types.NodeName(node.Name), newCondition)
+	return util.SetNodeCondition(e.config.Runtime.Core, node.Name, newCondition)
 }
 
 // getLearnerProgress returns the stored learnerProgress struct as retrieved from etcd
@@ -1354,12 +1473,10 @@ func (e *ETCD) setLearnerProgress(ctx context.Context, status *learnerProgress) 
 	return err
 }
 
-// clearAlarms checks for any alarms on the local etcd member. If found, they are
-// reported and the alarm state is cleared.
-func (e *ETCD) clearAlarms(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, testTimeout)
-	defer cancel()
-
+// clearAlarms checks for any NOSPACE alarms on the local etcd member.
+// If found, they are reported and the alarm state is cleared.
+// Other alarm types are not handled.
+func (e *ETCD) clearAlarms(ctx context.Context, memberID uint64) error {
 	if e.client == nil {
 		return errors.New("etcd client was nil")
 	}
@@ -1370,22 +1487,37 @@ func (e *ETCD) clearAlarms(ctx context.Context) error {
 	}
 
 	for _, alarm := range alarmList.Alarms {
-		logrus.Warnf("Alarm on etcd member %d: %s", alarm.MemberID, alarm.Alarm)
-	}
-
-	if len(alarmList.Alarms) > 0 {
-		if _, err := e.client.AlarmDisarm(ctx, &clientv3.AlarmMember{}); err != nil {
-			return fmt.Errorf("etcd alarm disarm failed: %v", err)
+		if alarm.MemberID != memberID {
+			// ignore alarms on other cluster members, they should manage their own problems
+			continue
 		}
-		logrus.Infof("Alarms disarmed on etcd server")
+		if alarm.Alarm == etcdserverpb.AlarmType_NOSPACE {
+			if _, err := e.client.AlarmDisarm(ctx, &clientv3.AlarmMember{MemberID: alarm.MemberID, Alarm: alarm.Alarm}); err != nil {
+				return fmt.Errorf("%s disarm failed: %v", alarm.Alarm, err)
+			}
+			logrus.Infof("%s disarmed successfully", alarm.Alarm)
+		} else {
+			return fmt.Errorf("%s alarm must be disarmed manually", alarm.Alarm)
+		}
 	}
 	return nil
 }
 
-func (e *ETCD) defragment(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, testTimeout)
+// status returns status using the first etcd endpoint.
+func (e *ETCD) status(ctx context.Context) (*clientv3.StatusResponse, error) {
+	if e.client == nil {
+		return nil, errors.New("etcd client was nil")
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, statusTimeout)
 	defer cancel()
 
+	endpoints := getEndpoints(e.config)
+	return e.client.Status(ctx, endpoints[0])
+}
+
+// defragment defragments the etcd datastore using the first etcd endpoint
+func (e *ETCD) defragment(ctx context.Context) error {
 	if e.client == nil {
 		return errors.New("etcd client was nil")
 	}
@@ -1416,7 +1548,7 @@ func ClientURLs(ctx context.Context, clientAccessInfo *clientaccess.Info, selfIP
 	// get the full list from the server we're joining
 	resp, err := clientAccessInfo.Get("/db/info")
 	if err != nil {
-		return nil, memberList, &MemberListError{Err: err}
+		return nil, memberList, &memberListError{err: err}
 	}
 	if err := json.Unmarshal(resp, &memberList); err != nil {
 		return nil, memberList, err
@@ -1463,13 +1595,13 @@ func (e *ETCD) Restore(ctx context.Context) error {
 	}
 
 	var restorePath string
-	if strings.HasSuffix(e.config.ClusterResetRestorePath, compressedExtension) {
-		snapshotDir, err := snapshotDir(e.config, true)
+	if strings.HasSuffix(e.config.ClusterResetRestorePath, snapshot.CompressedExtension) {
+		dir, err := snapshotDir(e.config, true)
 		if err != nil {
-			return errors.Wrap(err, "failed to get the snapshot dir")
+			return pkgerrors.WithMessage(err, "failed to get the snapshot dir")
 		}
 
-		decompressSnapshot, err := e.decompressSnapshot(snapshotDir, e.config.ClusterResetRestorePath)
+		decompressSnapshot, err := e.decompressSnapshot(dir, e.config.ClusterResetRestorePath)
 		if err != nil {
 			return err
 		}
@@ -1485,13 +1617,7 @@ func (e *ETCD) Restore(ctx context.Context) error {
 	}
 
 	logrus.Infof("Pre-restore etcd database moved to %s", oldDataDir)
-
-	lg, err := logutil.CreateDefaultZapLogger(zap.InfoLevel)
-	if err != nil {
-		return err
-	}
-
-	return snapshot.NewV3(lg).Restore(snapshot.RestoreConfig{
+	return snapshotv3.NewV3(e.client.GetLogger()).Restore(snapshotv3.RestoreConfig{
 		SnapshotPath:   restorePath,
 		Name:           e.name,
 		OutputDataDir:  dbDir(e.config),
@@ -1547,11 +1673,11 @@ func backupDirWithRetention(dir string, maxBackupRetention int) (string, error) 
 // GetAPIServerURLsFromETCD will try to fetch the version.Program/apiaddresses key from etcd
 // and unmarshal it to a list of apiserver endpoints.
 func GetAPIServerURLsFromETCD(ctx context.Context, cfg *config.Control) ([]string, error) {
-	cl, err := getClient(ctx, cfg)
+	cl, conn, err := getClient(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
-	defer cl.Close()
+	defer conn.Close()
 
 	etcdResp, err := cl.KV.Get(ctx, AddressKey)
 	if err != nil {
@@ -1573,8 +1699,11 @@ func GetAPIServerURLsFromETCD(ctx context.Context, cfg *config.Control) ([]strin
 // GetMembersClientURLs will list through the member lists in etcd and return
 // back a combined list of client urls for each member in the cluster
 func (e *ETCD) GetMembersClientURLs(ctx context.Context) ([]string, error) {
-	ctx, cancel := context.WithTimeout(ctx, testTimeout)
-	defer cancel()
+	if e.client == nil {
+		if err := e.startClient(ctx); err != nil {
+			return nil, err
+		}
+	}
 
 	members, err := e.client.MemberList(ctx)
 	if err != nil {
@@ -1588,24 +1717,6 @@ func (e *ETCD) GetMembersClientURLs(ctx context.Context) ([]string, error) {
 		}
 	}
 	return clientURLs, nil
-}
-
-// GetMembersNames will list through the member lists in etcd and return
-// back a combined list of member names
-func (e *ETCD) GetMembersNames(ctx context.Context) ([]string, error) {
-	ctx, cancel := context.WithTimeout(ctx, testTimeout)
-	defer cancel()
-
-	members, err := e.client.MemberList(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	var memberNames []string
-	for _, member := range members.Members {
-		memberNames = append(memberNames, member.Name)
-	}
-	return memberNames, nil
 }
 
 // RemoveSelf will remove the member if it exists in the cluster.  This should
@@ -1628,4 +1739,15 @@ func (e *ETCD) RemoveSelf(ctx context.Context) error {
 
 	// move the data directory to a temp path
 	return os.Rename(dbDir(e.config), oldDataDir)
+}
+
+// DefaultEndpointConfig returns default kine endpoint config, with k3s default
+// behavior of listening on a unix socket, advertising the embedded etcd version,
+// and disabling automatic compaction.
+func DefaultEndpointConfig() endpoint.Config {
+	return kine.Config([]string{
+		"--listen-address=" + endpoint.KineSocket,
+		"--emulated-etcd-version=" + etcdversion.Version,
+		"--compact-interval=0s",
+	})
 }

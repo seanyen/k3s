@@ -2,12 +2,12 @@ package etcd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/version"
-	"github.com/pkg/errors"
 	controllerv1 "github.com/rancher/wrangler/v3/pkg/generated/controllers/core/v1"
 	"github.com/sirupsen/logrus"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
@@ -95,6 +95,7 @@ func (e *etcdMemberHandler) sync(key string, node *v1.Node) (*v1.Node, error) {
 			// Set the removed node name annotation and delete the etcd name and address annotations.
 			// These will be re-set to their new value when the member rejoins the cluster.
 			node.Annotations[removedNodeNameAnnotation] = name
+			delete(node.Annotations, removalAnnotation)
 			delete(node.Annotations, NodeNameAnnotation)
 			delete(node.Annotations, NodeAddressAnnotation)
 			return e.nodeController.Update(node)

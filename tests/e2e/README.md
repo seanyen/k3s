@@ -18,7 +18,7 @@ A E2E test consists of two parts:
 1. `Vagrantfile`: a vagrant file which describes and configures the VMs upon which the cluster and test will run
 2. `<TEST_NAME>.go`: A go test file which calls `vagrant up` and controls the actual testing of the cluster
 
-See the [validate cluster test](../tests/e2e/validatecluster/validatecluster_test.go) as an example.
+See the [validate cluster test](./validatecluster/validatecluster_test.go) as an example.
 
 
 ## Setup
@@ -39,7 +39,11 @@ Follow the OS specific guides to install libvirt/qemu on your host:
 - ubuntu 22.04: 
   ```bash
   sudo apt install ruby-libvirt qemu libvirt-daemon-system libvirt-clients ebtables dnsmasq-base libxslt-dev libxml2-dev libvirt-dev zlib1g-dev ruby-dev libguestfs-tools
-  ```  
+  ```
+- ubuntu 24.04:
+  ```bash
+  sudo apt install ruby-libvirt qemu-kvm libvirt-daemon-system libvirt-clients ebtables dnsmasq-base libxslt-dev libxml2-dev libvirt-dev zlib1g-dev ruby-dev libguestfs-tools
+  ```
 - [debian](https://wiki.debian.org/KVM#Installation)  
 - [fedora](https://developer.fedoraproject.org/tools/virtualization/installing-libvirt-and-virt-install-on-fedora-linux.html)
 

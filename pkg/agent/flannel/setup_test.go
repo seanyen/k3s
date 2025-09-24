@@ -23,13 +23,16 @@ func Test_findNetMode(t *testing.T) {
 	tests := []struct {
 		name    string
 		args    string
-		want    int
+		wantv4  bool
+		wantv6  bool
 		wantErr bool
 	}{
-		{"dual-stack", "10.42.0.0/16,2001:cafe:22::/56", ipv4 + ipv6, false},
-		{"ipv4 only", "10.42.0.0/16", ipv4, false},
-		{"ipv6 only", "2001:cafe:42:0::/56", ipv6, false},
-		{"wrong input", "wrong", 0, true},
+		{"dual-stack", "10.42.0.0/16,2001:cafe:22::/56", true, true, false},
+		{"dual-stack ipv6 first", "2001:cafe:22::/56,10.42.0.0/16", true, true, false},
+		{"ipv4 only", "10.42.0.0/16", true, false, false},
+		{"ipv6 only", "2001:cafe:42:0::/56", false, true, false},
+		{"empty", "", false, false, true},
+		{"wrong input", "wrong", false, false, true},
 	}
 	for _, tt := range tests {
 
@@ -37,11 +40,13 @@ func Test_findNetMode(t *testing.T) {
 			netCidrs := stringToCIDR(tt.args)
 			got, err := findNetMode(netCidrs)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("findNetMode() error = %v, wantErr %v", err, tt.wantErr)
-				return
+				t.Fatalf("got error %v, want %v", err, tt.wantErr)
 			}
-			if got != tt.want {
-				t.Errorf("findNetMode() = %v, want %v", got, tt.want)
+			if gotv4 := got.IPv4Enabled(); gotv4 != tt.wantv4 {
+				t.Errorf("got ipv4 %v, want %v", gotv4, tt.wantv4)
+			}
+			if gotv6 := got.IPv6Enabled(); gotv6 != tt.wantv6 {
+				t.Errorf("got ipv6 %v, want %v", gotv6, tt.wantv6)
 			}
 		})
 	}
@@ -62,7 +67,7 @@ func Test_createFlannelConf(t *testing.T) {
 		var agent = config.Agent{}
 		agent.ClusterCIDR = stringToCIDR(tt.args)[0]
 		agent.ClusterCIDRs = stringToCIDR(tt.args)
-		var nodeConfig = &config.Node{Docker: false, ContainerRuntimeEndpoint: "", SELinux: false, FlannelBackend: "vxlan", FlannelConfFile: "test_file", FlannelConfOverride: false, FlannelIface: nil, Containerd: containerd, Images: "", AgentConfig: agent, Token: "", Certificate: nil, ServerHTTPSPort: 0}
+		var nodeConfig = &config.Node{Docker: false, ContainerRuntimeEndpoint: "", SELinux: false, FlannelBackend: "vxlan", FlannelConfFile: "test_file", FlannelConfOverride: false, FlannelIface: nil, Containerd: containerd, Images: "", AgentConfig: agent, Token: "", ServerHTTPSPort: 0}
 
 		t.Run(tt.name, func(t *testing.T) {
 			if err := createFlannelConf(nodeConfig); (err != nil) != tt.wantErr {

@@ -1,13 +1,5 @@
-ARG GOLANG=golang:1.22.4-alpine3.19
+ARG GOLANG=golang:1.24.6-alpine3.22
 FROM ${GOLANG}
-
-# Set proxy environment variables
-ARG http_proxy
-ARG https_proxy
-ARG no_proxy
-ENV http_proxy=${http_proxy} \
-    https_proxy=${https_proxy} \
-    no_proxy=${no_proxy}
 
 # Install necessary packages
 RUN apk -U --no-cache add \
@@ -22,21 +14,21 @@ RUN apk -U --no-cache add \
 RUN PIPX_BIN_DIR=/usr/local/bin pipx install awscli
 
 # Install Trivy
-ENV TRIVY_VERSION="0.51.4"
+ENV TRIVY_VERSION="0.59.0"
 RUN case "$(go env GOARCH)" in \
     arm64) TRIVY_ARCH="ARM64" ;; \
     amd64) TRIVY_ARCH="64bit" ;; \
     s390x) TRIVY_ARCH="s390x" ;; \
     *) TRIVY_ARCH="" ;; \
-    esac
-RUN if [ -n "${TRIVY_ARCH}" ]; then \ 
+    esac && \
+    if [ -n "${TRIVY_ARCH}" ]; then \ 
         wget --no-verbose "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-${TRIVY_ARCH}.tar.gz" \
         && tar -zxvf "trivy_${TRIVY_VERSION}_Linux-${TRIVY_ARCH}.tar.gz" \
         && mv trivy /usr/local/bin; \
     fi
 
 # Install goimports
-RUN GOPROXY=direct go install golang.org/x/tools/cmd/goimports@gopls/v0.11.0
+RUN GOPROXY=direct go install golang.org/x/tools/cmd/goimports@gopls/v0.16.0
 
 # Cleanup
 RUN rm -rf /go/src /go/pkg
@@ -52,7 +44,7 @@ ENV SELINUX=${SELINUX}
 
 # Set Dapper configuration variables
 ENV DAPPER_RUN_ARGS="--privileged -v k3s-cache:/go/src/github.com/k3s-io/k3s/.cache -v trivy-cache:/root/.cache/trivy" \
-    DAPPER_ENV="REPO TAG DRONE_TAG IMAGE_NAME SKIP_VALIDATE SKIP_IMAGE SKIP_AIRGAP AWS_SECRET_ACCESS_KEY AWS_ACCESS_KEY_ID GITHUB_TOKEN GOLANG GOCOVER DEBUG" \
+    DAPPER_ENV="REPO TAG DRONE_TAG IMAGE_NAME SKIP_VALIDATE SKIP_IMAGE SKIP_AIRGAP AWS_SECRET_ACCESS_KEY AWS_ACCESS_KEY_ID GITHUB_TOKEN GOLANG GOCOVER GOOS DEBUG" \
     DAPPER_SOURCE="/go/src/github.com/k3s-io/k3s/" \
     DAPPER_OUTPUT="./bin ./dist ./build/out ./build/static ./pkg/static ./pkg/deploy" \
     DAPPER_DOCKER_SOCKET=true \

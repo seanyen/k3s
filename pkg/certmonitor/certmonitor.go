@@ -2,15 +2,16 @@ package certmonitor
 
 import (
 	"context"
-	"crypto/x509"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	daemonconfig "github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/daemons/control/deps"
+	"github.com/k3s-io/k3s/pkg/daemons/executor"
 	"github.com/k3s-io/k3s/pkg/metrics"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/util/services"
@@ -35,7 +36,7 @@ var (
 
 	certificateExpirationSeconds = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: version.Program + "_certificate_expiration_seconds",
-		Help: "Remaining lifetime on the certificate.",
+		Help: "Remaining lifetime in seconds of the certificate, labeled by certificate subject and usages.",
 	}, []string{"subject", "usages"})
 )
 
@@ -67,6 +68,7 @@ func Setup(ctx context.Context, nodeConfig *daemonconfig.Node, dataDir string) e
 	}
 	deps.CreateRuntimeCertFiles(&controlConfig)
 
+	startupOnce := &sync.Once{}
 	caMap := map[string][]string{}
 	nodeList := services.Agent
 	if _, err := os.Stat(controlConfig.DataDir); err == nil {
@@ -83,16 +85,29 @@ func Setup(ctx context.Context, nodeConfig *daemonconfig.Node, dataDir string) e
 	}
 
 	go wait.Until(func() {
+		// don't check and create events until after the apiserver is up, otherwise the events may be lost.
+		<-executor.APIServerReadyChan()
+
 		logrus.Debugf("Running %s certificate expiration check", controllerName)
+		var hasErr bool
 		if err := checkCerts(nodeMap, time.Hour*24*daemonconfig.CertificateRenewDays); err != nil {
 			message := fmt.Sprintf("Node certificates require attention - restart %s on this node to trigger automatic rotation: %v", version.Program, err)
 			recorder.Event(nodeRef, corev1.EventTypeWarning, "CertificateExpirationWarning", message)
+			hasErr = true
 		}
 		if err := checkCerts(caMap, time.Hour*24*365); err != nil {
-			message := fmt.Sprintf("Certificate authority certificates require attention - check %s documentation and begin planning rotation: %v", version.Program, err)
+			message := fmt.Sprintf("Certificate Authority certificates require attention - check %s documentation and begin planning rotation: %v", version.Program, err)
 			recorder.Event(nodeRef, corev1.EventTypeWarning, "CACertificateExpirationWarning", message)
-
+			hasErr = true
 		}
+		// Only check for no errors and emit an OK event once, on the initial check after startup.
+		startupOnce.Do(func() {
+			if !hasErr {
+				message := fmt.Sprintf("Node and Certificate Authority certificates managed by %s are OK", version.Program)
+				recorder.Event(nodeRef, corev1.EventTypeNormal, "CertificateExpirationOK", message)
+			}
+		})
+
 	}, certCheckInterval, ctx.Done())
 
 	return nil
@@ -108,25 +123,18 @@ func checkCerts(fileMap map[string][]string, warningPeriod time.Duration) error 
 			basename := filepath.Base(file)
 			certs, _ := certutil.CertsFromFile(file)
 			for _, cert := range certs {
-				usages := []string{}
-				if cert.KeyUsage&x509.KeyUsageCertSign != 0 {
-					usages = append(usages, "CertSign")
-				}
-				for _, eku := range cert.ExtKeyUsage {
-					switch eku {
-					case x509.ExtKeyUsageServerAuth:
-						usages = append(usages, "ServerAuth")
-					case x509.ExtKeyUsageClientAuth:
-						usages = append(usages, "ClientAuth")
-					}
-				}
+				usages := util.GetCertUsages(cert)
 				certificateExpirationSeconds.WithLabelValues(cert.Subject.String(), strings.Join(usages, ",")).Set(cert.NotAfter.Sub(now).Seconds())
-				if now.Before(cert.NotBefore) {
-					errs = append(errs, fmt.Errorf("%s/%s: certificate %s is not valid before %s", service, basename, cert.Subject, cert.NotBefore.Format(time.RFC3339)))
-				} else if now.After(cert.NotAfter) {
-					errs = append(errs, fmt.Errorf("%s/%s: certificate %s expired at %s", service, basename, cert.Subject, cert.NotAfter.Format(time.RFC3339)))
-				} else if warn.After(cert.NotAfter) {
-					errs = append(errs, fmt.Errorf("%s/%s: certificate %s will expire within %d days at %s", service, basename, cert.Subject, int(warningPeriod.Hours()/24), cert.NotAfter.Format(time.RFC3339)))
+				status := util.GetCertStatus(cert, now, warn)
+				if status != util.CertStatusOK {
+					switch status {
+					case util.CertStatusNotYetValid:
+						errs = append(errs, fmt.Errorf("%s/%s: certificate %s is not valid before %s", service, basename, cert.Subject, cert.NotBefore.Format(time.RFC3339)))
+					case util.CertStatusExpired:
+						errs = append(errs, fmt.Errorf("%s/%s: certificate %s expired at %s", service, basename, cert.Subject, cert.NotAfter.Format(time.RFC3339)))
+					case util.CertStatusWarning:
+						errs = append(errs, fmt.Errorf("%s/%s: certificate %s will expire within %d days at %s", service, basename, cert.Subject, int(warningPeriod.Hours()/24), cert.NotAfter.Format(time.RFC3339)))
+					}
 				}
 			}
 		}

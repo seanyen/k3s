@@ -14,9 +14,11 @@ Since K3s is written in Go, it is fair to assume that the Go tools are all one n
 
 ## Non-Linux environment prerequisites
 
-All the test and build scripts within this repository were created to be run on GNU Linux development environments. Due to this, it is suggested to use the virtual machine defined on this repository's [Vagrantfile](../../Vagrantfile) to use them.
+All the test and build scripts within this repository were created to be run on GNU Linux development environments. For non-Linux environments, we recommend using Docker with our Dapper build environment, which provides all the necessary tools for building and testing K3s.
 
-Either way, if one still wants to build and test K3s on non-Linux environments, specific setups are to be followed.
+You can use the [Dockerfile.dapper](../../Dockerfile.dapper) to build K3s in a containerized environment with all required dependencies. See the [Building documentation](../../BUILDING.md) for more details on using Dapper for K3s development.
+
+If you still want to build and test K3s directly on non-Linux environments, specific setups are to be followed.
 
 ### Windows Setup
 
@@ -49,14 +51,6 @@ export PATH
 ### Go
 
 It is well known that K3s is written in [Go](http://golang.org). Please follow the [Go Getting Started guide](https://golang.org/doc/install) to install and set up the Go tools used to compile and run the test batteries.
-
-**Note:** K3s uses the same Go version as the Kubernetes components underneath. The table below lists the required Go versions for supported the Kubernetes releases.
-
-| Kubernetes     | requires Go |
-|----------------|-------------|
-| 1.19 - 1.20    | 1.15.5      |
-| 1.21 - 1.22    | 1.16.7      |
-| 1.23+          | 1.17        |
 
 ### Docker
 

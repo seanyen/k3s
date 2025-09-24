@@ -172,7 +172,6 @@ dump-logs() {
     echo "#- Finish: logs for run ($testID)"
     echo "#---------------------------------"
     echo
-    ./scripts/log-upload $TEST_DIR
 }
 export -f dump-logs
 
@@ -524,6 +523,32 @@ run-test() {
     )
 }
 export -f run-test
+
+run-go-test() {
+    local delay=15
+    (
+      set +x
+      while [ $(count-running-tests) -ge ${MAX_CONCURRENT_TESTS:-4} ]; do
+          sleep $delay
+      done
+    )
+    
+    if [ "$LABEL" ]; then
+        # Redirect stdout and stderr to separate file descriptors for labeling
+        go test -timeout=45m -v "$@" \
+            > >(awk "{ printf \"[\033[36m${LABEL}\033[m] %s\n\", \$0; fflush() }") \
+            2> >(awk "{ printf \"[\033[35m${LABEL}\033[m] %s\n\", \$0; fflush() }" >&2) &
+    else
+        go test -timeout=45m -v "$@" &
+    fi
+
+    pids+=($!)
+
+    if [ "$LABEL" ]; then
+        unset "LABEL"
+    fi   
+}
+export -f run-go-test
 
 # ---
 

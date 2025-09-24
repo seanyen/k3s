@@ -5,7 +5,7 @@ NODE_ROLES = (ENV['E2E_NODE_ROLES'] ||
   ["server-0"])
 NODE_BOXES = (ENV['E2E_NODE_BOXES'] ||
   ['opensuse/Leap-15.6.x86_64'])
-GITHUB_BRANCH = (ENV['E2E_GITHUB_BRANCH'] || "master")
+GITHUB_BRANCH = (ENV['E2E_GITHUB_BRANCH'] || "main")
 RELEASE_VERSION = (ENV['E2E_RELEASE_VERSION'] || "")
 NODE_CPUS = (ENV['E2E_NODE_CPUS'] || 2).to_i
 NODE_MEMORY = (ENV['E2E_NODE_MEMORY'] || 2048).to_i
@@ -51,6 +51,7 @@ def provision(vm, role, role_num, node_num)
       k3s.args = ["server"]
       k3s.env = %W[#{install_type}]
       k3s.config = <<~YAML
+        debug: true
         cluster-init: true
         node-external-ip: "#{NETWORK_PREFIX}.100"
         flannel-iface: eth1

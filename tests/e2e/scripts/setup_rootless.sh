@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # GitHub repository URL
-github_url="https://raw.githubusercontent.com/k3s-io/k3s/master/k3s-rootless.service"
+github_url="https://raw.githubusercontent.com/k3s-io/k3s/main/k3s-rootless.service"
 
 # Destination file path
 destination_path="/home/vagrant/.config/systemd/user/"
@@ -26,8 +26,10 @@ fi
 
 # Enable IPv4 forwarding
 echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+# Disable Ubuntu Restricted unprivileged user namespaces
+echo "kernel.apparmor_restrict_unprivileged_unconfined=0" >> /etc/sysctl.conf
+echo "kernel.apparmor_restrict_unprivileged_userns=0" >> /etc/sysctl.conf
 sysctl --system
-
 
 # Check if the string is already in GRUB_CMDLINE_LINUX
 if grep -qxF "GRUB_CMDLINE_LINUX=\"systemd.unified_cgroup_hierarchy=1 \"" /etc/default/grub; then
@@ -52,5 +54,3 @@ systemctl daemon-reload
 loginctl enable-linger vagrant
 # We need to run this as vagrant user, because rootless k3s will be run as vagrant user
 su -c 'XDG_RUNTIME_DIR="/run/user/$UID" DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus" systemctl --user daemon-reload' vagrant
-su -c 'XDG_RUNTIME_DIR="/run/user/$UID" DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus" systemctl --user enable --now k3s-rootless' vagrant
-

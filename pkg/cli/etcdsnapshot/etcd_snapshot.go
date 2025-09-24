@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,17 +13,18 @@ import (
 	"text/tabwriter"
 	"time"
 
-	k3s "github.com/k3s-io/k3s/pkg/apis/k3s.cattle.io/v1"
+	k3s "github.com/k3s-io/api/k3s.cattle.io/v1"
 	"github.com/k3s-io/k3s/pkg/cli/cmds"
 	"github.com/k3s-io/k3s/pkg/clientaccess"
 	"github.com/k3s-io/k3s/pkg/cluster/managed"
+	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/etcd"
 	"github.com/k3s-io/k3s/pkg/proctitle"
 	"github.com/k3s-io/k3s/pkg/server"
 	util2 "github.com/k3s-io/k3s/pkg/util"
-	"github.com/pkg/errors"
+	pkgerrors "github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	"github.com/urfave/cli"
+	"github.com/urfave/cli/v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/cli-runtime/pkg/printers"
 )
@@ -50,17 +52,22 @@ func commandSetup(app *cli.Context, cfg *cmds.Server) (*etcd.SnapshotRequest, *c
 	}
 
 	if cfg.EtcdS3 {
-		sr.S3 = &etcd.SnapshotRequestS3{}
-		sr.S3.AccessKey = cfg.EtcdS3AccessKey
-		sr.S3.Bucket = cfg.EtcdS3BucketName
-		sr.S3.Endpoint = cfg.EtcdS3Endpoint
-		sr.S3.EndpointCA = cfg.EtcdS3EndpointCA
-		sr.S3.Folder = cfg.EtcdS3Folder
-		sr.S3.Insecure = cfg.EtcdS3Insecure
-		sr.S3.Region = cfg.EtcdS3Region
-		sr.S3.SecretKey = cfg.EtcdS3SecretKey
-		sr.S3.SkipSSLVerify = cfg.EtcdS3SkipSSLVerify
-		sr.S3.Timeout = metav1.Duration{Duration: cfg.EtcdS3Timeout}
+		sr.S3 = &config.EtcdS3{
+			AccessKey:     cfg.EtcdS3AccessKey,
+			Bucket:        cfg.EtcdS3BucketName,
+			BucketLookup:  cfg.EtcdS3BucketLookupType,
+			ConfigSecret:  cfg.EtcdS3ConfigSecret,
+			Endpoint:      cfg.EtcdS3Endpoint,
+			EndpointCA:    cfg.EtcdS3EndpointCA,
+			Folder:        cfg.EtcdS3Folder,
+			Insecure:      cfg.EtcdS3Insecure,
+			Proxy:         cfg.EtcdS3Proxy,
+			Region:        cfg.EtcdS3Region,
+			SecretKey:     cfg.EtcdS3SecretKey,
+			SkipSSLVerify: cfg.EtcdS3SkipSSLVerify,
+			Retention:     cfg.EtcdS3Retention,
+			Timeout:       metav1.Duration{Duration: cfg.EtcdS3Timeout},
+		}
 		// extend request timeout to allow the S3 operation to complete
 		timeout += cfg.EtcdS3Timeout
 	}
@@ -88,7 +95,7 @@ func wrapServerError(err error) error {
 		// since the operation may have actualy succeeded despite the client timing out the request.
 		return err
 	}
-	return errors.Wrap(err, "see server log for details")
+	return pkgerrors.WithMessage(err, "see server log for details")
 }
 
 // Save triggers an on-demand etcd snapshot operation
@@ -100,7 +107,7 @@ func Save(app *cli.Context) error {
 }
 
 func save(app *cli.Context, cfg *cmds.Server) error {
-	if len(app.Args()) > 0 {
+	if app.Args().Len() > 0 {
 		return util2.ErrCommandNoArgs
 	}
 
@@ -145,7 +152,7 @@ func Delete(app *cli.Context) error {
 
 func delete(app *cli.Context, cfg *cmds.Server) error {
 	snapshots := app.Args()
-	if len(snapshots) == 0 {
+	if snapshots.Len() == 0 {
 		return errors.New("no snapshots given for removal")
 	}
 
@@ -155,7 +162,7 @@ func delete(app *cli.Context, cfg *cmds.Server) error {
 	}
 
 	sr.Operation = etcd.SnapshotOperationDelete
-	sr.Name = snapshots
+	sr.Name = snapshots.Slice()
 
 	b, err := json.Marshal(sr)
 	if err != nil {
@@ -173,7 +180,7 @@ func delete(app *cli.Context, cfg *cmds.Server) error {
 	for _, name := range resp.Deleted {
 		logrus.Infof("Snapshot %s deleted.", name)
 	}
-	for _, name := range snapshots {
+	for _, name := range snapshots.Slice() {
 		if !slices.Contains(resp.Deleted, name) {
 			logrus.Warnf("Snapshot %s not found.", name)
 		}

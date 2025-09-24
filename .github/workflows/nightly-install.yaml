@@ -16,7 +16,7 @@ jobs:
       fail-fast: false
       matrix:
         channel: [stable, latest]
-        vm: [rocky-8, fedora, opensuse-leap, ubuntu-2204]
+        vm: [rocky-9, fedora, opensuse-leap, ubuntu-2404]
       max-parallel: 4
     defaults:
       run:
@@ -25,7 +25,7 @@ jobs:
       INSTALL_K3S_CHANNEL: ${{ matrix.channel }}
     steps:
       - name: "Checkout"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with: {fetch-depth: 1}
       - name: Set up vagrant and libvirt
         uses: ./.github/actions/vagrant-setup
@@ -39,7 +39,7 @@ jobs:
       - name: "Vagrant Plugin(s)"
         run: vagrant plugin install vagrant-k3s vagrant-reload
       - name: "Vagrant Up ⏩ Install K3s"
-        run: vagrant up
+        run: vagrant up --no-tty
       - name: "⏳ Node"
         run: vagrant provision --provision-with=k3s-wait-for-node
       - name: "⏳ CoreDNS"

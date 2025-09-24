@@ -4,16 +4,16 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 	"testing"
 
+	"github.com/k3s-io/k3s/tests"
 	"github.com/k3s-io/k3s/tests/e2e"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
-// Valid nodeOS: generic/ubuntu2310, opensuse/Leap-15.3.x86_64
-var nodeOS = flag.String("nodeOS", "generic/ubuntu2310", "VM operating system")
+// Valid nodeOS: bento/ubuntu-24.04, opensuse/Leap-15.6.x86_64
+var nodeOS = flag.String("nodeOS", "bento/ubuntu-24.04", "VM operating system")
 var serverCount = flag.Int("serverCount", 1, "number of server nodes")
 var agentCount = flag.Int("agentCount", 0, "number of agent nodes")
 var ci = flag.Bool("ci", false, "running on CI")
@@ -26,100 +26,86 @@ func Test_E2EWasm(t *testing.T) {
 	RunSpecs(t, "Run WebAssenbly Workloads Test Suite", suiteConfig, reporterConfig)
 }
 
-var (
-	kubeConfigFile  string
-	serverNodeNames []string
-	agentNodeNames  []string
-)
+var tc *e2e.TestConfig
 
 var _ = ReportAfterEach(e2e.GenReport)
 
-var _ = Describe("Verify Can run Wasm workloads", Ordered, func() {
-
-	It("Starts up with no issues", func() {
-		var err error
-		if *local {
-			serverNodeNames, agentNodeNames, err = e2e.CreateLocalCluster(*nodeOS, *serverCount, *agentCount)
-		} else {
-			serverNodeNames, agentNodeNames, err = e2e.CreateCluster(*nodeOS, *serverCount, *agentCount)
-		}
-		Expect(err).NotTo(HaveOccurred(), e2e.GetVagrantLog(err))
-		fmt.Println("CLUSTER CONFIG")
-		fmt.Println("OS:", *nodeOS)
-		fmt.Println("Server Nodes:", serverNodeNames)
-		fmt.Println("Agent Nodes:", agentNodeNames)
-		kubeConfigFile, err = e2e.GenKubeConfigFile(serverNodeNames[0])
-		Expect(err).NotTo(HaveOccurred())
-	})
-
-	// Server node needs to be ready before we continue
-	It("Checks Node and Pod Status", func() {
-		fmt.Printf("\nFetching node status\n")
-		Eventually(func(g Gomega) {
-			nodes, err := e2e.ParseNodes(kubeConfigFile, false)
-			g.Expect(err).NotTo(HaveOccurred())
-			for _, node := range nodes {
-				g.Expect(node.Status).Should(Equal("Ready"))
+var _ = Describe("Verify K3s can run Wasm workloads", Ordered, func() {
+	Context("Cluster comes up with Wasm configuration", func() {
+		It("Starts up with no issues", func() {
+			var err error
+			if *local {
+				tc, err = e2e.CreateLocalCluster(*nodeOS, *serverCount, *agentCount)
+			} else {
+				tc, err = e2e.CreateCluster(*nodeOS, *serverCount, *agentCount)
 			}
-		}, "620s", "5s").Should(Succeed())
-		_, _ = e2e.ParseNodes(kubeConfigFile, true)
+			Expect(err).NotTo(HaveOccurred(), e2e.GetVagrantLog(err))
+			By("CLUSTER CONFIG")
+			By("OS: " + *nodeOS)
+			By(tc.Status())
+		})
 
-		fmt.Printf("\nFetching Pods status\n")
-		Eventually(func(g Gomega) {
-			pods, err := e2e.ParsePods(kubeConfigFile, false)
-			g.Expect(err).NotTo(HaveOccurred())
-			for _, pod := range pods {
-				if strings.Contains(pod.Name, "helm-install") {
-					g.Expect(pod.Status).Should(Equal("Completed"), pod.Name)
-				} else {
-					g.Expect(pod.Status).Should(Equal("Running"), pod.Name)
+		It("Checks node and pod status", func() {
+			By("Fetching Nodes status")
+			Eventually(func() error {
+				return tests.NodesReady(tc.KubeconfigFile, e2e.VagrantSlice(tc.AllNodes()))
+			}, "620s", "5s").Should(Succeed())
+
+			By("Fetching pod status")
+			Eventually(func() error {
+				return tests.AllPodsUp(tc.KubeconfigFile, "kube-system")
+			}, "620s", "10s").Should(Succeed())
+			Eventually(func() error {
+				return tests.CheckDefaultDeployments(tc.KubeconfigFile)
+			}, "300s", "10s").Should(Succeed())
+		})
+
+		It("Verify wasm-related containerd shims are installed", func() {
+			expected_shims := []string{"containerd-shim-spin-v2", "containerd-shim-slight-v1"}
+			for _, node := range tc.AllNodes() {
+				for _, shim := range expected_shims {
+					cmd := fmt.Sprintf("which %s", shim)
+					_, err := node.RunCmdOnNode(cmd)
+					Expect(err).NotTo(HaveOccurred())
 				}
 			}
-		}, "620s", "5s").Should(Succeed())
-		_, _ = e2e.ParsePods(kubeConfigFile, true)
-	})
-
-	It("Verify wasm-related containerd shims are installed", func() {
-		expected_shims := []string{"containerd-shim-spin-v2", "containerd-shim-slight-v1"}
-		for _, node := range append(serverNodeNames, agentNodeNames...) {
-			for _, shim := range expected_shims {
-				cmd := fmt.Sprintf("which %s", shim)
-				_, err := e2e.RunCmdOnNode(cmd, node)
-				Expect(err).NotTo(HaveOccurred())
-			}
-		}
+		})
 	})
 
 	Context("Verify Wasm workloads can run on the cluster", func() {
 		It("Deploy Wasm workloads", func() {
-			out, err := e2e.DeployWorkload("wasm-workloads.yaml", kubeConfigFile, false)
+			out, err := tc.DeployWorkload("wasm-workloads.yaml")
 			Expect(err).NotTo(HaveOccurred(), out)
 		})
 
 		It("Wait for slight Pod to be up and running", func() {
 			Eventually(func() (string, error) {
-				cmd := "kubectl get pods -o=name -l app=wasm-slight --field-selector=status.phase=Running --kubeconfig=" + kubeConfigFile
+				cmd := "kubectl get pods -o=name -l app=wasm-slight --field-selector=status.phase=Running --kubeconfig=" + tc.KubeconfigFile
 				return e2e.RunCommand(cmd)
 			}, "240s", "5s").Should(ContainSubstring("pod/wasm-slight"))
 		})
 
 		It("Wait for spin Pod to be up and running", func() {
 			Eventually(func() (string, error) {
-				cmd := "kubectl get pods -o=name -l app=wasm-spin --field-selector=status.phase=Running --kubeconfig=" + kubeConfigFile
+				cmd := "kubectl get pods -o=name -l app=wasm-spin --field-selector=status.phase=Running --kubeconfig=" + tc.KubeconfigFile
 				return e2e.RunCommand(cmd)
 			}, "120s", "5s").Should(ContainSubstring("pod/wasm-spin"))
 		})
 
 		It("Interact with Wasm applications", func() {
-			ingressIPs, err := e2e.FetchIngressIP(kubeConfigFile)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(ingressIPs).To(HaveLen(1))
+			var ingressIPs []string
+			var err error
+			Eventually(func(g Gomega) {
+				ingressIPs, err = e2e.FetchIngressIP(tc.KubeconfigFile)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(ingressIPs).To(HaveLen(1))
+			}, "120s", "5s").Should(Succeed())
 
 			endpoints := []string{"slight/hello", "spin/go-hello", "spin/hello"}
 			for _, endpoint := range endpoints {
 				url := fmt.Sprintf("http://%s/%s", ingressIPs[0], endpoint)
 				fmt.Printf("Connecting to Wasm web application at: %s\n", url)
-				cmd := "curl -sfv " + url
+				cmd := "curl -m 5 -s -f -v " + url
 
 				Eventually(func() (string, error) {
 					return e2e.RunCommand(cmd)
@@ -135,11 +121,14 @@ var _ = AfterEach(func() {
 })
 
 var _ = AfterSuite(func() {
-	if failed && !*ci {
-		fmt.Println("FAILED!")
+	if failed {
+		Expect(e2e.SaveJournalLogs(tc.AllNodes())).To(Succeed())
+		Expect(e2e.TailPodLogs(50, tc.AllNodes())).To(Succeed())
 	} else {
-		Expect(e2e.GetCoverageReport(append(serverNodeNames, agentNodeNames...))).To(Succeed())
+		Expect(e2e.GetCoverageReport(tc.AllNodes())).To(Succeed())
+	}
+	if !failed || *ci {
 		Expect(e2e.DestroyCluster()).To(Succeed())
-		Expect(os.Remove(kubeConfigFile)).To(Succeed())
+		Expect(os.Remove(tc.KubeconfigFile)).To(Succeed())
 	}
 })

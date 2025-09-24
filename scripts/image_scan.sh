@@ -2,15 +2,14 @@
 
 set -e 
 
-if [ -z $1 ] && [ -z $2 ]; then
-    echo "error: image name and arch name are required as arguments. exiting..."
+if [ -z $1 ]; then
+    echo "error: image name is required as argument. exiting..."
     exit 1
 fi
 
-ARCH=$2
-
-# skipping image scan for 32 bits image since trivy dropped support for those https://github.com/aquasecurity/trivy/discussions/4789
-if  [[ "${ARCH}" = "arm" ]] || [ "${ARCH}" != "386" ]; then
+# we wont have trivy installed if its an unsupported arch
+if [ -z "$(which trivy)" ]; then
+    echo "warning: trivy scan being skipped since 'trivy' executable not found in path"
     exit 0
 fi
 
@@ -31,7 +30,11 @@ TRIVY_TEMPLATE='{{- $critical := 0 }}{{- $high := 0 }}
     {{- end -}}
 {{ end }}
 Vulnerabilities - Critical: {{ $critical }}, High: {{ $high }}{{ println }}'
+VEX_REPORT="rancher.openvex.json"
 
-trivy --quiet image --severity ${SEVERITIES} --no-progress --ignore-unfixed --format template --template "${TRIVY_TEMPLATE}" ${IMAGE}
+# Download Rancher's VEX Hub standalone report
+curl -fsS -o ${VEX_REPORT} https://raw.githubusercontent.com/rancher/vexhub/refs/heads/main/reports/rancher.openvex.json
+
+trivy --quiet image --severity ${SEVERITIES} --vex ${VEX_REPORT} --no-progress --ignore-unfixed --format template --template "${TRIVY_TEMPLATE}" ${IMAGE}
 
 exit 0

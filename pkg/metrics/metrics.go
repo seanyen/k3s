@@ -6,8 +6,12 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/k3s-io/k3s/pkg/agent/https"
+	"github.com/k3s-io/k3s/pkg/agent/loadbalancer"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
+	"github.com/k3s-io/k3s/pkg/etcd"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	lassometrics "github.com/rancher/lasso/pkg/metrics"
+	rdmetrics "github.com/rancher/remotedialer/metrics"
 	"k8s.io/component-base/metrics/legacyregistry"
 )
 
@@ -26,6 +30,17 @@ var DefaultMetrics = &Config{
 	Router: func(context.Context, *config.Node) (*mux.Router, error) {
 		return nil, errors.New("not implemented")
 	},
+}
+
+func init() {
+	// ensure that lasso exposes metrics through the same registry used by Kubernetes components
+	lassometrics.MustRegister(DefaultRegisterer)
+	// same for loadbalancer metrics
+	loadbalancer.MustRegister(DefaultRegisterer)
+	// and etcd snapshot metrics
+	etcd.MustRegister(DefaultRegisterer)
+	// and remotedialer metrics
+	rdmetrics.MustRegister(DefaultRegisterer)
 }
 
 // Config holds fields for the metrics listener

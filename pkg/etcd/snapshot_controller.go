@@ -2,24 +2,29 @@ package etcd
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	apisv1 "github.com/k3s-io/k3s/pkg/apis/k3s.cattle.io/v1"
-	controllersv1 "github.com/k3s-io/k3s/pkg/generated/controllers/k3s.cattle.io/v1"
+	apisv1 "github.com/k3s-io/api/k3s.cattle.io/v1"
+	k3s "github.com/k3s-io/api/k3s.cattle.io/v1"
+	controllersv1 "github.com/k3s-io/api/pkg/generated/controllers/k3s.cattle.io/v1"
+	"github.com/k3s-io/k3s/pkg/etcd/snapshot"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/version"
-	"github.com/pkg/errors"
+	pkgerrors "github.com/pkg/errors"
 	controllerv1 "github.com/rancher/wrangler/v3/pkg/generated/controllers/core/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/tools/pager"
 	"k8s.io/client-go/util/retry"
 
 	"github.com/sirupsen/logrus"
@@ -81,19 +86,19 @@ func (e *etcdSnapshotHandler) sync(key string, esf *apisv1.ETCDSnapshotFile) (*a
 		return nil, nil
 	}
 
-	sf := snapshotFile{}
-	sf.fromETCDSnapshotFile(esf)
-	sfKey := generateSnapshotConfigMapKey(sf)
-	m, err := marshalSnapshotFile(sf)
+	sf := &snapshot.File{}
+	sf.FromETCDSnapshotFile(esf)
+	sfKey := sf.GenerateConfigMapKey()
+	m, err := sf.Marshal()
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to marshal snapshot ConfigMap data")
+		return nil, pkgerrors.WithMessage(err, "failed to marshal snapshot ConfigMap data")
 	}
 	marshalledSnapshot := string(m)
 
 	snapshotConfigMap, err := e.configmaps.Get(metav1.NamespaceSystem, snapshotConfigMapName, metav1.GetOptions{})
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
-			return nil, errors.Wrap(err, "failed to get snapshot ConfigMap")
+			return nil, pkgerrors.WithMessage(err, "failed to get snapshot ConfigMap")
 		}
 		snapshotConfigMap = &v1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
@@ -138,7 +143,7 @@ func (e *etcdSnapshotHandler) sync(key string, esf *apisv1.ETCDSnapshotFile) (*a
 	}
 
 	if err != nil {
-		err = errors.Wrap(err, "failed to sync snapshot to ConfigMap")
+		err = pkgerrors.WithMessage(err, "failed to sync snapshot to ConfigMap")
 	}
 
 	return nil, err
@@ -153,14 +158,14 @@ func (e *etcdSnapshotHandler) onRemove(key string, esf *apisv1.ETCDSnapshotFile)
 		if apierrors.IsNotFound(err) {
 			return nil, nil
 		}
-		return nil, errors.Wrap(err, "failed to get snapshot ConfigMap")
+		return nil, pkgerrors.WithMessage(err, "failed to get snapshot ConfigMap")
 	}
 
 	sfKey := generateETCDSnapshotFileConfigMapKey(*esf)
 	if _, ok := snapshotConfigMap.Data[sfKey]; ok {
 		delete(snapshotConfigMap.Data, sfKey)
 		if _, err := e.configmaps.Update(snapshotConfigMap); err != nil {
-			return nil, errors.Wrap(err, "failed to remove snapshot from ConfigMap")
+			return nil, pkgerrors.WithMessage(err, "failed to remove snapshot from ConfigMap")
 		}
 	}
 	e.etcd.emitEvent(esf)
@@ -215,26 +220,31 @@ func (e *etcdSnapshotHandler) reconcile() error {
 	logrus.Infof("Reconciling snapshot ConfigMap data")
 
 	// Get a list of existing snapshots
-	snapshotList, err := e.snapshots.List(metav1.ListOptions{})
-	if err != nil {
-		return err
-	}
-
 	snapshots := map[string]*apisv1.ETCDSnapshotFile{}
-	for i := range snapshotList.Items {
-		esf := &snapshotList.Items[i]
+	snapshotPager := pager.New(pager.SimplePageFunc(func(opts metav1.ListOptions) (k8sruntime.Object, error) { return e.snapshots.List(opts) }))
+	snapshotPager.PageSize = snapshotListPageSize
+
+	if err := snapshotPager.EachListItem(e.ctx, metav1.ListOptions{}, func(obj k8sruntime.Object) error {
+		esf, ok := obj.(*k3s.ETCDSnapshotFile)
+		if !ok {
+			return errors.New("failed to convert object to ETCDSnapshotFile")
+		}
+
 		// Do not create entries for snapshots that have been deleted or do not have extra metadata
 		if !esf.DeletionTimestamp.IsZero() || len(esf.Spec.Metadata) == 0 {
-			continue
+			return nil
 		}
 		sfKey := generateETCDSnapshotFileConfigMapKey(*esf)
 		snapshots[sfKey] = esf
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	snapshotConfigMap, err := e.configmaps.Get(metav1.NamespaceSystem, snapshotConfigMapName, metav1.GetOptions{})
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
-			return errors.Wrap(err, "failed to get snapshot ConfigMap")
+			return pkgerrors.WithMessage(err, "failed to get snapshot ConfigMap")
 		}
 		snapshotConfigMap = &v1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
@@ -283,9 +293,9 @@ func (e *etcdSnapshotHandler) reconcile() error {
 
 	// Ensure keys for existing snapshots
 	for sfKey, esf := range snapshots {
-		sf := snapshotFile{}
-		sf.fromETCDSnapshotFile(esf)
-		m, err := marshalSnapshotFile(sf)
+		sf := &snapshot.File{}
+		sf.FromETCDSnapshotFile(esf)
+		m, err := sf.Marshal()
 		if err != nil {
 			logrus.Warnf("Failed to marshal snapshot ConfigMap data for %s", sfKey)
 			continue
@@ -327,12 +337,12 @@ func pruneConfigMap(snapshotConfigMap *v1.ConfigMap, pruneCount int) error {
 		return errors.New("unable to reduce snapshot ConfigMap size by eliding old snapshots")
 	}
 
-	var snapshotFiles []snapshotFile
+	var snapshotFiles []snapshot.File
 	retention := len(snapshotConfigMap.Data) - pruneCount
 	for name := range snapshotConfigMap.Data {
-		basename, compressed := strings.CutSuffix(name, compressedExtension)
+		basename, compressed := strings.CutSuffix(name, snapshot.CompressedExtension)
 		ts, _ := strconv.ParseInt(basename[strings.LastIndexByte(basename, '-')+1:], 10, 64)
-		snapshotFiles = append(snapshotFiles, snapshotFile{Name: name, CreatedAt: &metav1.Time{Time: time.Unix(ts, 0)}, Compressed: compressed})
+		snapshotFiles = append(snapshotFiles, snapshot.File{Name: name, CreatedAt: &metav1.Time{Time: time.Unix(ts, 0)}, Compressed: compressed})
 	}
 
 	// sort newest-first so we can prune entries past the retention count

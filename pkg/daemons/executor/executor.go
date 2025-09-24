@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/k3s-io/k3s/pkg/cli/cmds"
@@ -20,38 +21,52 @@ var (
 	executor Executor
 )
 
+// TestFunc is the signature of a function that returns nil error when the component is ready
+type TestFunc func(context.Context) error
+
 type Executor interface {
 	Bootstrap(ctx context.Context, nodeConfig *daemonconfig.Node, cfg cmds.Agent) error
 	Kubelet(ctx context.Context, args []string) error
 	KubeProxy(ctx context.Context, args []string) error
 	APIServerHandlers(ctx context.Context) (authenticator.Request, http.Handler, error)
-	APIServer(ctx context.Context, etcdReady <-chan struct{}, args []string) error
-	Scheduler(ctx context.Context, apiReady <-chan struct{}, args []string) error
-	ControllerManager(ctx context.Context, apiReady <-chan struct{}, args []string) error
+	APIServer(ctx context.Context, args []string) error
+	Scheduler(ctx context.Context, nodeReady <-chan struct{}, args []string) error
+	ControllerManager(ctx context.Context, args []string) error
 	CurrentETCDOptions() (InitialOptions, error)
-	ETCD(ctx context.Context, args ETCDConfig, extraArgs []string) error
+	ETCD(ctx context.Context, wg *sync.WaitGroup, args *ETCDConfig, extraArgs []string, test TestFunc) error
 	CloudControllerManager(ctx context.Context, ccmRBACReady <-chan struct{}, args []string) error
 	Containerd(ctx context.Context, node *daemonconfig.Node) error
 	Docker(ctx context.Context, node *daemonconfig.Node) error
+	CRI(ctx context.Context, node *daemonconfig.Node) error
+	APIServerReadyChan() <-chan struct{}
+	ETCDReadyChan() <-chan struct{}
+	CRIReadyChan() <-chan struct{}
+	IsSelfHosted() bool
+}
+
+type ETCDSocketOpts struct {
+	ReuseAddress bool `json:"reuse-address,omitempty"`
+	ReusePort    bool `json:"reuse-port,omitempty"`
 }
 
 type ETCDConfig struct {
 	InitialOptions       `json:",inline"`
-	Name                 string      `json:"name,omitempty"`
-	ListenClientURLs     string      `json:"listen-client-urls,omitempty"`
-	ListenClientHTTPURLs string      `json:"listen-client-http-urls,omitempty"`
-	ListenMetricsURLs    string      `json:"listen-metrics-urls,omitempty"`
-	ListenPeerURLs       string      `json:"listen-peer-urls,omitempty"`
-	AdvertiseClientURLs  string      `json:"advertise-client-urls,omitempty"`
-	DataDir              string      `json:"data-dir,omitempty"`
-	SnapshotCount        int         `json:"snapshot-count,omitempty"`
-	ServerTrust          ServerTrust `json:"client-transport-security"`
-	PeerTrust            PeerTrust   `json:"peer-transport-security"`
-	ForceNewCluster      bool        `json:"force-new-cluster,omitempty"`
-	HeartbeatInterval    int         `json:"heartbeat-interval"`
-	ElectionTimeout      int         `json:"election-timeout"`
-	Logger               string      `json:"logger"`
-	LogOutputs           []string    `json:"log-outputs"`
+	Name                 string         `json:"name,omitempty"`
+	ListenClientURLs     string         `json:"listen-client-urls,omitempty"`
+	ListenClientHTTPURLs string         `json:"listen-client-http-urls,omitempty"`
+	ListenMetricsURLs    string         `json:"listen-metrics-urls,omitempty"`
+	ListenPeerURLs       string         `json:"listen-peer-urls,omitempty"`
+	AdvertiseClientURLs  string         `json:"advertise-client-urls,omitempty"`
+	DataDir              string         `json:"data-dir,omitempty"`
+	SnapshotCount        int            `json:"snapshot-count,omitempty"`
+	ServerTrust          ServerTrust    `json:"client-transport-security"`
+	PeerTrust            PeerTrust      `json:"peer-transport-security"`
+	ForceNewCluster      bool           `json:"force-new-cluster,omitempty"`
+	HeartbeatInterval    int            `json:"heartbeat-interval"`
+	ElectionTimeout      int            `json:"election-timeout"`
+	Logger               string         `json:"logger"`
+	LogOutputs           []string       `json:"log-outputs"`
+	SocketOpts           ETCDSocketOpts `json:"socket-options"`
 
 	ExperimentalInitialCorruptCheck         bool          `json:"experimental-initial-corrupt-check"`
 	ExperimentalWatchProgressNotifyInterval time.Duration `json:"experimental-watch-progress-notify-interval"`
@@ -150,24 +165,24 @@ func APIServerHandlers(ctx context.Context) (authenticator.Request, http.Handler
 	return executor.APIServerHandlers(ctx)
 }
 
-func APIServer(ctx context.Context, etcdReady <-chan struct{}, args []string) error {
-	return executor.APIServer(ctx, etcdReady, args)
+func APIServer(ctx context.Context, args []string) error {
+	return executor.APIServer(ctx, args)
 }
 
-func Scheduler(ctx context.Context, apiReady <-chan struct{}, args []string) error {
-	return executor.Scheduler(ctx, apiReady, args)
+func Scheduler(ctx context.Context, nodeReady <-chan struct{}, args []string) error {
+	return executor.Scheduler(ctx, nodeReady, args)
 }
 
-func ControllerManager(ctx context.Context, apiReady <-chan struct{}, args []string) error {
-	return executor.ControllerManager(ctx, apiReady, args)
+func ControllerManager(ctx context.Context, args []string) error {
+	return executor.ControllerManager(ctx, args)
 }
 
 func CurrentETCDOptions() (InitialOptions, error) {
 	return executor.CurrentETCDOptions()
 }
 
-func ETCD(ctx context.Context, args ETCDConfig, extraArgs []string) error {
-	return executor.ETCD(ctx, args, extraArgs)
+func ETCD(ctx context.Context, wg *sync.WaitGroup, args *ETCDConfig, extraArgs []string, test TestFunc) error {
+	return executor.ETCD(ctx, wg, args, extraArgs, test)
 }
 
 func CloudControllerManager(ctx context.Context, ccmRBACReady <-chan struct{}, args []string) error {
@@ -180,4 +195,31 @@ func Containerd(ctx context.Context, config *daemonconfig.Node) error {
 
 func Docker(ctx context.Context, config *daemonconfig.Node) error {
 	return executor.Docker(ctx, config)
+}
+
+func CRI(ctx context.Context, config *daemonconfig.Node) error {
+	return executor.CRI(ctx, config)
+}
+
+func APIServerReadyChan() <-chan struct{} {
+	return executor.APIServerReadyChan()
+}
+
+func ETCDReadyChan() <-chan struct{} {
+	return executor.ETCDReadyChan()
+}
+
+func CRIReadyChan() <-chan struct{} {
+	return executor.CRIReadyChan()
+}
+
+func IsSelfHosted() bool {
+	return executor.IsSelfHosted()
+}
+
+func CloseIfNilErr(err error, ch chan struct{}) error {
+	if err == nil {
+		close(ch)
+	}
+	return err
 }

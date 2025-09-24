@@ -3,10 +3,10 @@ package deps
 import (
 	"bytes"
 	"crypto"
-	cryptorand "crypto/rand"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
-	b64 "encoding/base64"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,21 +23,21 @@ import (
 	"github.com/k3s-io/k3s/pkg/cloudprovider"
 	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/k3s-io/k3s/pkg/passwd"
+	"github.com/k3s-io/k3s/pkg/secretsencrypt"
 	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/k3s/pkg/version"
 	certutil "github.com/rancher/dynamiclistener/cert"
 	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apiserver/pkg/apis/apiserver"
 	apiserverconfigv1 "k8s.io/apiserver/pkg/apis/apiserver/v1"
+	apiserverv1beta1 "k8s.io/apiserver/pkg/apis/apiserver/v1beta1"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/client-go/util/keyutil"
 )
 
 const (
 	ipsecTokenSize = 48
-	aescbcKeySize  = 32
 
 	RequestHeaderCN = "system:auth-proxy"
 )
@@ -143,6 +143,12 @@ func CreateRuntimeCertFiles(config *config.Control) {
 	runtime.ServingKubeAPICert = filepath.Join(config.DataDir, "tls", "serving-kube-apiserver.crt")
 	runtime.ServingKubeAPIKey = filepath.Join(config.DataDir, "tls", "serving-kube-apiserver.key")
 
+	runtime.ServingKubeSchedulerCert = filepath.Join(config.DataDir, "tls", "kube-scheduler", "kube-scheduler.crt")
+	runtime.ServingKubeSchedulerKey = filepath.Join(config.DataDir, "tls", "kube-scheduler", "kube-scheduler.key")
+
+	runtime.ServingKubeControllerCert = filepath.Join(config.DataDir, "tls", "kube-controller-manager", "kube-controller-manager.crt")
+	runtime.ServingKubeControllerKey = filepath.Join(config.DataDir, "tls", "kube-controller-manager", "kube-controller-manager.key")
+
 	runtime.ClientKubeletKey = filepath.Join(config.DataDir, "tls", "client-kubelet.key")
 	runtime.ServingKubeletKey = filepath.Join(config.DataDir, "tls", "serving-kubelet.key")
 
@@ -173,6 +179,11 @@ func CreateRuntimeCertFiles(config *config.Control) {
 // needed to successfully bootstrap a cluster.
 func GenServerDeps(config *config.Control) error {
 	runtime := config.Runtime
+
+	if err := cleanupLegacyCerts(config); err != nil {
+		return err
+	}
+
 	if err := genCerts(config); err != nil {
 		return err
 	}
@@ -391,11 +402,11 @@ func genClientCerts(config *config.Control) error {
 		}
 	}
 
-	if _, err = factory(user.KubeProxy, nil, runtime.ClientKubeProxyCert, runtime.ClientKubeProxyKey); err != nil {
+	if _, _, err := certutil.LoadOrGenerateKeyFile(runtime.ClientKubeProxyKey, regen); err != nil {
 		return err
 	}
-	// This user (system:k3s-controller by default) must be bound to a role in rolebindings.yaml or the downstream equivalent
-	if _, err = factory("system:"+version.Program+"-controller", nil, runtime.ClientK3sControllerCert, runtime.ClientK3sControllerKey); err != nil {
+
+	if _, _, err := certutil.LoadOrGenerateKeyFile(runtime.ClientK3sControllerKey, regen); err != nil {
 		return err
 	}
 
@@ -437,6 +448,23 @@ func genServerCerts(config *config.Control) error {
 	}
 
 	if _, _, err := certutil.LoadOrGenerateKeyFile(runtime.ServingKubeletKey, regen); err != nil {
+		return err
+	}
+
+	altNames = &certutil.AltNames{}
+	addSANs(altNames, []string{"localhost", "127.0.0.1", "::1"})
+
+	if _, err := createClientCertKey(regen, "kube-scheduler", nil,
+		altNames, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		runtime.ServerCA, runtime.ServerCAKey,
+		runtime.ServingKubeSchedulerCert, runtime.ServingKubeSchedulerKey); err != nil {
+		return err
+	}
+
+	if _, err := createClientCertKey(regen, "kube-controller-manager", nil,
+		altNames, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		runtime.ServerCA, runtime.ServerCAKey,
+		runtime.ServingKubeControllerCert, runtime.ServingKubeControllerKey); err != nil {
 		return err
 	}
 
@@ -641,6 +669,20 @@ func createClientCertKey(regen bool, commonName string, organization []string, a
 	return true, certutil.WriteCert(certFile, util.EncodeCertsPEM(cert, caCerts))
 }
 
+func cleanupLegacyCerts(config *config.Control) error {
+	// remove legacy certs that are no longer used
+	legacyCerts := []string{
+		config.Runtime.ClientKubeProxyCert,
+		config.Runtime.ClientK3sControllerCert,
+	}
+	for _, cert := range legacyCerts {
+		if err := os.Remove(cert); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
 func exists(files ...string) bool {
 	for _, file := range files {
 		if _, err := os.Stat(file); err != nil {
@@ -725,6 +767,15 @@ func genEncryptionConfigAndState(controlConfig *config.Control) error {
 	if !controlConfig.EncryptSecrets {
 		return nil
 	}
+	var keyName string
+	switch controlConfig.EncryptProvider {
+	case secretsencrypt.AESCBCProvider:
+		keyName = "aescbckey"
+	case secretsencrypt.SecretBoxProvider:
+		keyName = "secretboxkey"
+	default:
+		return fmt.Errorf("unsupported secrets-encryption-key-type %s", controlConfig.EncryptProvider)
+	}
 	if s, err := os.Stat(runtime.EncryptionConfig); err == nil && s.Size() > 0 {
 		// On upgrade from older versions, the encryption hash may not exist, create it
 		if _, err := os.Stat(runtime.EncryptionHash); errors.Is(err, os.ErrNotExist) {
@@ -739,12 +790,40 @@ func genEncryptionConfigAndState(controlConfig *config.Control) error {
 		return nil
 	}
 
-	aescbcKey := make([]byte, aescbcKeySize)
-	_, err := cryptorand.Read(aescbcKey)
-	if err != nil {
+	keyByte := make([]byte, secretsencrypt.KeySize)
+	if _, err := rand.Read(keyByte); err != nil {
 		return err
 	}
-	encodedKey := b64.StdEncoding.EncodeToString(aescbcKey)
+	newKey := []apiserverconfigv1.Key{
+		{
+			Name:   keyName,
+			Secret: base64.StdEncoding.EncodeToString(keyByte),
+		},
+	}
+	var provider []apiserverconfigv1.ProviderConfiguration
+	if controlConfig.EncryptProvider == secretsencrypt.AESCBCProvider {
+		provider = []apiserverconfigv1.ProviderConfiguration{
+			{
+				AESCBC: &apiserverconfigv1.AESConfiguration{
+					Keys: newKey,
+				},
+			},
+			{
+				Identity: &apiserverconfigv1.IdentityConfiguration{},
+			},
+		}
+	} else if controlConfig.EncryptProvider == secretsencrypt.SecretBoxProvider {
+		provider = []apiserverconfigv1.ProviderConfiguration{
+			{
+				Secretbox: &apiserverconfigv1.SecretboxConfiguration{
+					Keys: newKey,
+				},
+			},
+			{
+				Identity: &apiserverconfigv1.IdentityConfiguration{},
+			},
+		}
+	}
 
 	encConfig := apiserverconfigv1.EncryptionConfiguration{
 		TypeMeta: metav1.TypeMeta{
@@ -754,21 +833,7 @@ func genEncryptionConfigAndState(controlConfig *config.Control) error {
 		Resources: []apiserverconfigv1.ResourceConfiguration{
 			{
 				Resources: []string{"secrets"},
-				Providers: []apiserverconfigv1.ProviderConfiguration{
-					{
-						AESCBC: &apiserverconfigv1.AESConfiguration{
-							Keys: []apiserverconfigv1.Key{
-								{
-									Name:   "aescbckey",
-									Secret: encodedKey,
-								},
-							},
-						},
-					},
-					{
-						Identity: &apiserverconfigv1.IdentityConfiguration{},
-					},
-				},
+				Providers: provider,
 			},
 		},
 	}
@@ -785,19 +850,19 @@ func genEncryptionConfigAndState(controlConfig *config.Control) error {
 }
 
 func genEgressSelectorConfig(controlConfig *config.Control) error {
-	var clusterConn apiserver.Connection
+	var clusterConn apiserverv1beta1.Connection
 
 	if controlConfig.EgressSelectorMode == config.EgressSelectorModeDisabled {
-		clusterConn = apiserver.Connection{
-			ProxyProtocol: apiserver.ProtocolDirect,
+		clusterConn = apiserverv1beta1.Connection{
+			ProxyProtocol: apiserverv1beta1.ProtocolDirect,
 		}
 	} else {
-		clusterConn = apiserver.Connection{
-			ProxyProtocol: apiserver.ProtocolHTTPConnect,
-			Transport: &apiserver.Transport{
-				TCP: &apiserver.TCPTransport{
+		clusterConn = apiserverv1beta1.Connection{
+			ProxyProtocol: apiserverv1beta1.ProtocolHTTPConnect,
+			Transport: &apiserverv1beta1.Transport{
+				TCP: &apiserverv1beta1.TCPTransport{
 					URL: fmt.Sprintf("https://%s:%d", controlConfig.BindAddressOrLoopback(false, true), controlConfig.SupervisorPort),
-					TLSConfig: &apiserver.TLSConfig{
+					TLSConfig: &apiserverv1beta1.TLSConfig{
 						CABundle:   controlConfig.Runtime.ServerCA,
 						ClientKey:  controlConfig.Runtime.ClientKubeAPIKey,
 						ClientCert: controlConfig.Runtime.ClientKubeAPICert,
@@ -807,12 +872,12 @@ func genEgressSelectorConfig(controlConfig *config.Control) error {
 		}
 	}
 
-	egressConfig := apiserver.EgressSelectorConfiguration{
+	egressConfig := apiserverv1beta1.EgressSelectorConfiguration{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "EgressSelectorConfiguration",
 			APIVersion: "apiserver.k8s.io/v1beta1",
 		},
-		EgressSelections: []apiserver.EgressSelection{
+		EgressSelections: []apiserverv1beta1.EgressSelection{
 			{
 				Name:       "cluster",
 				Connection: clusterConn,

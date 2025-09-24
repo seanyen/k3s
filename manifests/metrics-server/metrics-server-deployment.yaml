@@ -35,16 +35,15 @@ spec:
         - key: "node-role.kubernetes.io/control-plane"
           operator: "Exists"
           effect: "NoSchedule"
-        - key: "node-role.kubernetes.io/master"
-          operator: "Exists"
-          effect: "NoSchedule"
+      nodeSelector:
+        kubernetes.io/os: linux
       volumes:
       # mount in tmp so we can safely use from-scratch images and/or read-only containers
       - name: tmp-dir
         emptyDir: {}
       containers:
       - name: metrics-server
-        image: "%{SYSTEM_DEFAULT_REGISTRY}%rancher/mirrored-metrics-server:v0.7.0"
+        image: "%{SYSTEM_DEFAULT_REGISTRY}%rancher/mirrored-metrics-server:v0.8.0"
         args:
         - --cert-dir=/tmp
         - --secure-port=10250

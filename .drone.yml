@@ -10,26 +10,12 @@ trigger:
   event:
     exclude:
     - cron
+    - pull_request
 
 clone:
   retries: 3
 
 steps:
-- name: skipfiles
-  image: plugins/git
-  commands:
-  - export NAME=$(test $DRONE_BUILD_EVENT = pull_request && echo remotes/origin/${DRONE_COMMIT_BRANCH:-master} || echo ${DRONE_COMMIT_SHA}~)
-  - export DIFF=$(git --no-pager diff --name-only $NAME | grep -v -f .droneignore);
-  - if [ -z "$DIFF" ]; then
-        echo "All files in PR are on ignore list";
-        exit 78;
-    else
-        echo "Some files in PR are not ignored, $DIFF";
-    fi;
-  when:
-    event:
-    - pull_request
-
 - name: build
   image: rancher/dapper:v0.6.0
   secrets: [ AWS_SECRET_ACCESS_KEY-k3s-ci-uploader, AWS_ACCESS_KEY_ID-k3s-ci-uploader, unprivileged_github_token ]
@@ -47,14 +33,6 @@ steps:
   - name: docker
     path: /var/run/docker.sock
 
-- name: validate-cross-compilation
-  image: rancher/dapper:v0.6.0
-  commands:
-  - dapper validate-cross-compilation
-  volumes:
-  - name: docker
-    path: /var/run/docker.sock
-
 - name: fossa
   image: rancher/drone-fossa:latest
   failure: ignore
@@ -66,33 +44,11 @@ steps:
       - drone-publish.k3s.io
     ref:
       include:
-        - "refs/heads/master"
+        - "refs/heads/main"
         - "refs/heads/release-*"
     event:
       - push
       - tag
-
-- name: github_binary_release
-  image: plugins/github-release
-  settings:
-    api_key:
-      from_secret: github_token
-    prerelease: true
-    checksum:
-    - sha256
-    checksum_file: CHECKSUMsum-amd64.txt
-    checksum_flatten: true
-    files:
-    - "dist/artifacts/*"
-  when:
-    instance:
-    - drone-publish.k3s.io
-    ref:
-    - refs/head/master
-    - refs/tags/*
-    event:
-    - tag
-
 - name: docker-publish
   image: plugins/docker
   settings:
@@ -108,7 +64,7 @@ steps:
     instance:
     - drone-publish.k3s.io
     ref:
-    - refs/head/master
+    - refs/head/main
     - refs/tags/*
     event:
     - tag
@@ -190,26 +146,12 @@ trigger:
   event:
     exclude:
     - cron
+    - pull_request
 
 clone:
   retries: 3
 
 steps:
-- name: skipfiles
-  image: plugins/git
-  commands:
-  - export NAME=$(test $DRONE_BUILD_EVENT = pull_request && echo remotes/origin/${DRONE_COMMIT_BRANCH:-master} || echo ${DRONE_COMMIT_SHA}~)
-  - export DIFF=$(git --no-pager diff --name-only $NAME | grep -v -f .droneignore);
-  - if [ -z "$DIFF" ]; then
-        echo "All files in PR are on ignore list";
-        exit 78;
-    else
-        echo "Some files in PR are not ignored, $DIFF";
-    fi;
-  when:
-    event:
-    - pull_request
-
 - name: build
   image: rancher/dapper:v0.6.0
   secrets: [ AWS_SECRET_ACCESS_KEY-k3s-ci-uploader, AWS_ACCESS_KEY_ID-k3s-ci-uploader ]
@@ -224,27 +166,6 @@ steps:
   volumes:
   - name: docker
     path: /var/run/docker.sock
-
-- name: github_binary_release
-  image: plugins/github-release
-  settings:
-    api_key:
-      from_secret: github_token
-    prerelease: true
-    checksum:
-    - sha256
-    checksum_file: CHECKSUMsum-arm64.txt
-    checksum_flatten: true
-    files:
-    - "dist/artifacts/*"
-  when:
-    instance:
-    - drone-publish.k3s.io
-    ref:
-    - refs/head/master
-    - refs/tags/*
-    event:
-    - tag
 
 - name: docker-publish
   image: plugins/docker
@@ -261,7 +182,7 @@ steps:
     instance:
     - drone-publish.k3s.io
     ref:
-    - refs/head/master
+    - refs/head/main
     - refs/tags/*
     event:
     - tag
@@ -309,7 +230,7 @@ steps:
 - name: skipfiles
   image: plugins/git
   commands:
-  - export NAME=$(test $DRONE_BUILD_EVENT = pull_request && echo remotes/origin/${DRONE_COMMIT_BRANCH:-master} || echo ${DRONE_COMMIT_SHA}~)
+  - export NAME=$(test $DRONE_BUILD_EVENT = pull_request && echo remotes/origin/${DRONE_COMMIT_BRANCH:-main} || echo ${DRONE_COMMIT_SHA}~)
   - export DIFF=$(git --no-pager diff --name-only $NAME | grep -v -f .droneignore);
   - if [ -z "$DIFF" ]; then
         echo "All files in PR are on ignore list";
@@ -340,28 +261,6 @@ steps:
   volumes:
   - name: docker
     path: /var/run/docker.sock
-
-- name: github_binary_release
-  image: plugins/github-release:linux-arm
-  settings:
-    api_key:
-      from_secret: github_token
-    prerelease: true
-    checksum:
-    - sha256
-    checksum_file: CHECKSUMsum-arm.txt
-    checksum_flatten: true
-    files:
-    - "dist/artifacts/*"
-  when:
-    instance:
-    - drone-publish.k3s.io
-    ref:
-    - refs/head/master
-    - refs/tags/*
-    event:
-    - tag
-
 - name: docker-publish
   image: plugins/docker:linux-arm
   settings:
@@ -377,7 +276,7 @@ steps:
     instance:
     - drone-publish.k3s.io
     ref:
-    - refs/head/master
+    - refs/head/main
     - refs/tags/*
     event:
     - tag
@@ -408,51 +307,6 @@ volumes:
 
 ---
 kind: pipeline
-name: validate_go_mods
-
-platform:
-  os: linux
-  arch: amd64
-
-trigger:
-  event:
-    exclude:
-    - cron
-
-steps:
-- name: skipfiles
-  image: plugins/git
-  commands:
-  - export NAME=$(test $DRONE_BUILD_EVENT = pull_request && echo remotes/origin/${DRONE_COMMIT_BRANCH:-master} || echo ${DRONE_COMMIT_SHA}~)
-  - export DIFF=$(git --no-pager diff --name-only $NAME | grep -v -f .droneignore);
-  - if [ -z "$DIFF" ]; then
-        echo "All files in PR are on ignore list";
-        exit 78;
-    else
-        echo "Some files in PR are not ignored, $DIFF";
-    fi;
-  when:
-    event:
-    - push
-    - pull_request
-
-- name: validate_go_mods
-  image: rancher/dapper:v0.6.0
-  commands:
-  - docker build --target test-mods -t k3s:mod -f Dockerfile.test .
-  - docker run -i k3s:mod
-
-  volumes:
-  - name: docker
-    path: /var/run/docker.sock
-
-volumes:
-- name: docker
-  host:
-    path: /var/run/docker.sock
-
----
-kind: pipeline
 name: manifest
 
 platform:
@@ -463,7 +317,7 @@ steps:
 - name: skipfiles
   image: plugins/git
   commands:
-  - export NAME=$(test $DRONE_BUILD_EVENT = pull_request && echo remotes/origin/${DRONE_COMMIT_BRANCH:-master} || echo ${DRONE_COMMIT_SHA}~)
+  - export NAME=$(test $DRONE_BUILD_EVENT = pull_request && echo remotes/origin/${DRONE_COMMIT_BRANCH:-main} || echo ${DRONE_COMMIT_SHA}~)
   - export DIFF=$(git --no-pager diff --name-only $NAME | grep -v -f .droneignore);
   - if [ -z "$DIFF" ]; then
         echo "All files in PR are on ignore list";
@@ -495,7 +349,7 @@ trigger:
   instance:
   - drone-publish.k3s.io
   ref:
-  - refs/head/master
+  - refs/head/main
   - refs/tags/*
   event:
     include:
@@ -523,7 +377,7 @@ steps:
 - name: skipfiles
   image: plugins/git
   commands:
-  - export NAME=$(test $DRONE_BUILD_EVENT = pull_request && echo remotes/origin/${DRONE_COMMIT_BRANCH:-master} || echo ${DRONE_COMMIT_SHA}~)
+  - export NAME=$(test $DRONE_BUILD_EVENT = pull_request && echo remotes/origin/${DRONE_COMMIT_BRANCH:-main} || echo ${DRONE_COMMIT_SHA}~)
   - export DIFF=$(git --no-pager diff --name-only $NAME | grep -v -f .droneignore);
   - if [ -z "$DIFF" ]; then
         echo "All files in PR are on ignore list";
@@ -555,7 +409,7 @@ trigger:
   instance:
     - drone-publish.k3s.io
   ref:
-    - refs/head/master
+    - refs/head/main
     - refs/tags/*
   event:
     - tag
@@ -579,7 +433,7 @@ steps:
 - name: skipfiles
   image: plugins/git
   commands:
-  - export NAME=$(test $DRONE_BUILD_EVENT = pull_request && echo remotes/origin/${DRONE_COMMIT_BRANCH:-master} || echo ${DRONE_COMMIT_SHA}~)
+  - export NAME=$(test $DRONE_BUILD_EVENT = pull_request && echo remotes/origin/${DRONE_COMMIT_BRANCH:-main} || echo ${DRONE_COMMIT_SHA}~)
   - export DIFF=$(git --no-pager diff --name-only $NAME | grep -v -f .droneignore);
   - if [ -z "$DIFF" ]; then
         echo "All files in PR are on ignore list";
@@ -593,10 +447,11 @@ steps:
     - pull_request
 
 - name: build-e2e-image
-  image: rancher/dapper:v0.6.0
+  image: docker:25.0.5
   commands:
     - DOCKER_BUILDKIT=1 docker build --target test-e2e -t test-e2e -f Dockerfile.test .
-    - SKIP_VALIDATE=true SKIP_AIRGAP=true GOCOVER=1 dapper ci
+    - apk add make git bash
+    - GOCOVER=1 make local-binary
     - cp dist/artifacts/* /tmp/artifacts/
   volumes:
   - name: cache
@@ -604,7 +459,9 @@ steps:
   - name: docker
     path: /var/run/docker.sock
 
-- name: test-e2e
+- name: test-e2e-validatecluster
+  depends_on:
+    - build-e2e-image
   image: test-e2e
   pull: never
   resources:
@@ -616,34 +473,14 @@ steps:
   commands:
   - mkdir -p dist/artifacts
   - cp /tmp/artifacts/* dist/artifacts/
-  - docker stop registry && docker rm registry
   # Cleanup VMs that are older than 2h. Happens if a previous test panics or is canceled
   - tests/e2e/scripts/cleanup_vms.sh
-  - docker run -d -p 5000:5000 -e REGISTRY_PROXY_REMOTEURL=https://registry-1.docker.io --name registry registry:2
+  - tests/e2e/scripts/drone_registries.sh
   - |
     cd tests/e2e/validatecluster
-    vagrant destroy -f
+    ../scripts/cleanup_vms.sh 'validatecluster_([0-9]+)_(server|agent)'
     go test -v -timeout=45m ./validatecluster_test.go -ci -local
     cp ./coverage.out /tmp/artifacts/validate-coverage.out
-  - |
-    cd ../secretsencryption
-    vagrant destroy -f
-    go test -v -timeout=30m ./secretsencryption_test.go -ci -local
-    cp ./coverage.out /tmp/artifacts/se-coverage.out
-  - |
-    cd ../splitserver
-    vagrant destroy -f
-    go test -v -timeout=30m ./splitserver_test.go -ci -local
-    cp ./coverage.out /tmp/artifacts/split-coverage.out
-  - |
-    if [ "$DRONE_BUILD_EVENT" = "pull_request" ]; then
-      cd ../upgradecluster
-      vagrant destroy -f
-      E2E_RELEASE_CHANNEL="latest" go test -v -timeout=45m ./upgradecluster_test.go  -ci -local
-      cp ./coverage.out /tmp/artifacts/upgrade-coverage.out
-    fi
-  - docker stop registry && docker rm registry
-  
   volumes:
   - name: libvirt
     path: /var/run/libvirt/
@@ -652,14 +489,90 @@ steps:
   - name: cache
     path: /tmp/artifacts
 
+- name: test-e2e-splitserver
+  depends_on:
+    - build-e2e-image
+  image: test-e2e
+  pull: never
+  resources:
+    cpu: 6000
+    memory: 10Gi
+  environment:
+    E2E_REGISTRY: 'true'
+    E2E_GOCOVER: 'true'
+  commands:
+  - mkdir -p dist/artifacts
+  - cp /tmp/artifacts/* dist/artifacts/
+  - tests/e2e/scripts/drone_registries.sh
+  - |
+    cd tests/e2e/splitserver
+    ../scripts/cleanup_vms.sh 'splitserver_([0-9]+)'
+    # Stagger the launch of this test with the validatecluster test
+    # to prevent conflicts over libvirt network interfaces
+    sleep 15
+    go test -v -timeout=30m ./splitserver_test.go -ci -local
+    cp ./coverage.out /tmp/artifacts/split-coverage.out
+  volumes:
+  - name: libvirt
+    path: /var/run/libvirt/
+  - name: docker
+    path: /var/run/docker.sock
+  - name: cache
+    path: /tmp/artifacts
+
+- name: test-e2e-upgradecluster
+  depends_on:
+    - build-e2e-image
+  image: test-e2e
+  pull: never
+  resources:
+    cpu: 6000
+    memory: 10Gi
+  environment:
+    E2E_REGISTRY: 'true'
+    E2E_GOCOVER: 'true'
+  commands:
+  - mkdir -p dist/artifacts
+  - cp /tmp/artifacts/* dist/artifacts/
+  - tests/e2e/scripts/drone_registries.sh
+  - |
+    if [ "$DRONE_BUILD_EVENT" = "pull_request" ]; then
+      cd tests/e2e/upgradecluster
+      # Convert release-1.XX branch to v1.XX channel
+      if [ "$DRONE_BRANCH" = "main" ]; then
+        UPGRADE_CHANNEL="latest"
+      else
+        UPGRADE_CHANNEL=$(echo $DRONE_BRANCH | sed 's/release-/v/')
+        # Check if the UPGRADE_CHANNEL exists, in the case of new minor releases it won't
+        if ! curl --head --silent --fail https://update.k3s.io/v1-release/channels/$UPGRADE_CHANNEL; then
+          UPGRADE_CHANNEL="latest"
+        fi
+      fi
+      ../scripts/cleanup_vms.sh 'upgradecluster_([0-9]+)_(server|agent)'
+      # Stagger the launch of this test with the splitserver test
+      # to prevent conflicts over libvirt network interfaces
+      sleep 30
+      E2E_RELEASE_CHANNEL=$UPGRADE_CHANNEL go test -v -timeout=45m ./upgradecluster_test.go  -ci -local -ginkgo.v
+      cp ./coverage.out /tmp/artifacts/upgrade-coverage.out
+    fi
+  volumes:
+  - name: libvirt
+    path: /var/run/libvirt/
+  - name: docker
+    path: /var/run/docker.sock
+  - name: cache
+    path: /tmp/artifacts
 - name: upload to codecov
+  depends_on:
+    - test-e2e-validatecluster
+    - test-e2e-splitserver
+    - test-e2e-upgradecluster
   image: robertstettner/drone-codecov
   settings:
     token: 
       from_secret: codecov_token
     files:
       - /tmp/artifacts/validate-coverage.out
-      - /tmp/artifacts/se-coverage.out
       - /tmp/artifacts/split-coverage.out
       - /tmp/artifacts/upgrade-coverage.out
     flags: 
@@ -667,7 +580,6 @@ steps:
   when:
     event:
     - push
-
   volumes:
   - name: cache
     path: /tmp/artifacts

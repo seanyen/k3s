@@ -15,9 +15,10 @@ import (
 	"github.com/k3s-io/k3s/pkg/proctitle"
 	"github.com/k3s-io/k3s/pkg/secretsencrypt"
 	"github.com/k3s-io/k3s/pkg/server"
+	"github.com/k3s-io/k3s/pkg/server/handlers"
 	"github.com/k3s-io/k3s/pkg/version"
-	"github.com/pkg/errors"
-	"github.com/urfave/cli"
+	pkgerrors "github.com/pkg/errors"
+	"github.com/urfave/cli/v2"
 	"k8s.io/utils/ptr"
 )
 
@@ -43,7 +44,7 @@ func commandPrep(cfg *cmds.Server) (*clientaccess.Info, error) {
 }
 
 func wrapServerError(err error) error {
-	return errors.Wrap(err, "see server log for details")
+	return pkgerrors.WithMessage(err, "see server log for details")
 }
 
 func Enable(app *cli.Context) error {
@@ -54,7 +55,7 @@ func Enable(app *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	b, err := json.Marshal(server.EncryptionRequest{Enable: ptr.To(true)})
+	b, err := json.Marshal(handlers.EncryptionRequest{Enable: ptr.To(true)})
 	if err != nil {
 		return err
 	}
@@ -73,7 +74,7 @@ func Disable(app *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	b, err := json.Marshal(server.EncryptionRequest{Enable: ptr.To(false)})
+	b, err := json.Marshal(handlers.EncryptionRequest{Enable: ptr.To(false)})
 	if err != nil {
 		return err
 	}
@@ -96,7 +97,7 @@ func Status(app *cli.Context) error {
 	if err != nil {
 		return wrapServerError(err)
 	}
-	status := server.EncryptionState{}
+	status := handlers.EncryptionState{}
 	if err := json.Unmarshal(data, &status); err != nil {
 		return err
 	}
@@ -135,10 +136,12 @@ func Status(app *cli.Context) error {
 	fmt.Fprintf(w, "Active\tKey Type\tName\n")
 	fmt.Fprintf(w, "------\t--------\t----\n")
 	if status.ActiveKey != "" {
-		fmt.Fprintf(w, " *\t%s\t%s\n", "AES-CBC", status.ActiveKey)
+		ak := strings.Split(status.ActiveKey, " ")
+		fmt.Fprintf(w, " *\t%s\t%s\n", ak[0], ak[1])
 	}
 	for _, k := range status.InactiveKeys {
-		fmt.Fprintf(w, "\t%s\t%s\n", "AES-CBC", k)
+		ik := strings.Split(k, " ")
+		fmt.Fprintf(w, "\t%s\t%s\n", ik[0], ik[1])
 	}
 	w.Flush()
 	fmt.Println(statusOutput + tabBuffer.String())
@@ -153,7 +156,7 @@ func Prepare(app *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	b, err := json.Marshal(server.EncryptionRequest{
+	b, err := json.Marshal(handlers.EncryptionRequest{
 		Stage: ptr.To(secretsencrypt.EncryptionPrepare),
 		Force: cmds.ServerConfig.EncryptForce,
 	})
@@ -175,7 +178,7 @@ func Rotate(app *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	b, err := json.Marshal(server.EncryptionRequest{
+	b, err := json.Marshal(handlers.EncryptionRequest{
 		Stage: ptr.To(secretsencrypt.EncryptionRotate),
 		Force: cmds.ServerConfig.EncryptForce,
 	})
@@ -197,7 +200,7 @@ func Reencrypt(app *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	b, err := json.Marshal(server.EncryptionRequest{
+	b, err := json.Marshal(handlers.EncryptionRequest{
 		Stage: ptr.To(secretsencrypt.EncryptionReencryptActive),
 		Force: cmds.ServerConfig.EncryptForce,
 		Skip:  cmds.ServerConfig.EncryptSkip,
@@ -220,16 +223,16 @@ func RotateKeys(app *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	b, err := json.Marshal(server.EncryptionRequest{
+	b, err := json.Marshal(handlers.EncryptionRequest{
 		Stage: ptr.To(secretsencrypt.EncryptionRotateKeys),
 	})
 	if err != nil {
 		return err
 	}
-	timeout := 70 * time.Second
+	timeout := 90 * time.Second
 	if err = info.Put("/v1-"+version.Program+"/encrypt/config", b, clientaccess.WithTimeout(timeout)); err != nil {
 		return wrapServerError(err)
 	}
-	fmt.Println("keys rotated, reencryption started")
+	fmt.Println("keys rotated, reencryption finished")
 	return nil
 }

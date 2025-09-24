@@ -4,14 +4,16 @@ on:
     - cron: '0 20 * * *'
   workflow_dispatch:
 permissions:
-  contents: write
-  issues: write
+  contents: read
 jobs:
   stalebot:
     runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: write
     steps:
       - name: Close Stale Issues
-        uses: actions/stale@v9.0.0
+        uses: actions/stale@v10.0.0
         with:
           # ensure PRs are exempt
           days-before-pr-stale: -1

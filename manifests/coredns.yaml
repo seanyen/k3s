@@ -106,9 +106,6 @@ spec:
         - key: "node-role.kubernetes.io/control-plane"
           operator: "Exists"
           effect: "NoSchedule"
-        - key: "node-role.kubernetes.io/master"
-          operator: "Exists"
-          effect: "NoSchedule"
       nodeSelector:
         kubernetes.io/os: linux
       topologySpreadConstraints:
@@ -118,9 +115,15 @@ spec:
           labelSelector:
             matchLabels:
               k8s-app: kube-dns
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              k8s-app: kube-dns
       containers:
       - name: coredns
-        image: "%{SYSTEM_DEFAULT_REGISTRY}%rancher/mirrored-coredns-coredns:1.10.1"
+        image: "%{SYSTEM_DEFAULT_REGISTRY}%rancher/mirrored-coredns-coredns:1.12.3"
         imagePullPolicy: IfNotPresent
         resources:
           limits:
